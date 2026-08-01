@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import cv2
 from PIL import Image
 
 from PySide6.QtCore import Qt, QThread, Signal, QSize
@@ -20,7 +21,10 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
+    QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -399,6 +403,289 @@ class ImageView(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# 尺寸缩放工具页
+# ---------------------------------------------------------------------------
+
+# 算法名 -> cv2 插值标志
+SCALE_ALGORITHMS: dict[str, int] = {
+    "最近邻 (Nearest)": cv2.INTER_NEAREST,
+    "双线性 (Bilinear)": cv2.INTER_LINEAR,
+    "双三次 (Bicubic)": cv2.INTER_CUBIC,
+    "Lanczos": cv2.INTER_LANCZOS4,
+    "区域平均 (Area)": cv2.INTER_AREA,
+}
+
+
+class ScaleWidget(QWidget):
+    """尺寸缩放工具:打开原图,通过算法 + 目标尺寸实时缩放,支持导出。"""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+
+        self.input_image: np.ndarray | None = None  # 原图 RGB uint8
+        self.last_saved_path: str | None = None
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(10)
+
+        # ---- 顶部控件栏 --------------------------------------------------
+        ctrl_row = QHBoxLayout()
+        ctrl_row.setSpacing(8)
+
+        self.btn_open = QPushButton("打开图片…")
+        self.btn_open.clicked.connect(self.on_open)
+        ctrl_row.addWidget(self.btn_open)
+
+        self.lbl_file = QLabel("未选择文件")
+        self.lbl_file.setStyleSheet("color: #666;")
+        ctrl_row.addWidget(self.lbl_file, 1)
+
+        ctrl_row.addStretch(1)
+        root.addLayout(ctrl_row)
+
+        # ---- 左右分栏:参数 + 预览 -----------------------------------------
+        body = QHBoxLayout()
+        body.setSpacing(10)
+
+        # 左:参数面板
+        param_box = QGroupBox("缩放参数")
+        form = QFormLayout(param_box)
+        form.setContentsMargins(10, 14, 10, 10)
+        form.setSpacing(8)
+
+        self.cmb_algo = QComboBox()
+        self.cmb_algo.addItems(list(SCALE_ALGORITHMS.keys()))
+        self.cmb_algo.setCurrentText("最近邻 (Nearest)")
+        self.cmb_algo.currentTextChanged.connect(self._refresh_preview)
+        form.addRow("插值算法:", self.cmb_algo)
+
+        self.spn_w = QSpinBox()
+        self.spn_w.setRange(1, 16384)
+        self.spn_w.setValue(1)
+        self.spn_w.setFixedWidth(120)
+        form.addRow("目标宽度:", self.spn_w)
+
+        self.spn_h = QSpinBox()
+        self.spn_h.setRange(1, 16384)
+        self.spn_h.setValue(1)
+        self.spn_h.setFixedWidth(120)
+        form.addRow("目标高度:", self.spn_h)
+
+        self.chk_ratio = QCheckBox("保持宽高比")
+        self.chk_ratio.setChecked(True)
+        form.addRow("", self.chk_ratio)
+
+        self.dsp_scale = QDoubleSpinBox()
+        self.dsp_scale.setRange(0.01, 100.0)
+        self.dsp_scale.setDecimals(2)
+        self.dsp_scale.setSingleStep(0.1)
+        self.dsp_scale.setValue(1.0)
+        self.dsp_scale.setFixedWidth(120)
+        form.addRow("缩放倍率:", self.dsp_scale)
+
+        self.btn_apply = QPushButton("应用倍率")
+        self.btn_apply.clicked.connect(self._apply_scale_to_size)
+        form.addRow("", self.btn_apply)
+
+        body.addWidget(param_box, 0)
+
+        # 右:双图预览
+        preview_wrap = QVBoxLayout()
+        preview_wrap.setSpacing(10)
+        self.view_input = ImageView("原图")
+        self.view_output = ImageView("缩放后预览")
+        preview_wrap.addWidget(self.view_input, 1)
+        preview_wrap.addWidget(self.view_output, 1)
+        preview_wrap_w = QWidget()
+        preview_wrap_w.setLayout(preview_wrap)
+        body.addWidget(preview_wrap_w, 1)
+        root.addLayout(body, 1)
+
+        # ---- 底部导出栏 --------------------------------------------------
+        bottom = QHBoxLayout()
+        bottom.setSpacing(8)
+        self.btn_save_png = QPushButton("导出 PNG…")
+        self.btn_save_png.clicked.connect(lambda: self._on_save("png"))
+        self.btn_save_png.setEnabled(False)
+        bottom.addWidget(self.btn_save_png)
+
+        self.btn_save_jpg = QPushButton("导出 JPEG…")
+        self.btn_save_jpg.clicked.connect(lambda: self._on_save("jpg"))
+        self.btn_save_jpg.setEnabled(False)
+        bottom.addWidget(self.btn_save_jpg)
+        bottom.addStretch(1)
+        root.addLayout(bottom)
+
+        # ---- 拖拽上传 ----------------------------------------------------
+        self.setAcceptDrops(True)
+
+        # 信号连接(放在最末,避免 setValue 触发空刷新)
+        self.spn_w.valueChanged.connect(self._on_w_changed)
+        self.spn_h.valueChanged.connect(self._on_h_changed)
+        self.dsp_scale.valueChanged.connect(self._on_scale_changed)
+
+    # ------------------------------------------------------------------
+    # 拖拽
+    # ------------------------------------------------------------------
+    def dragEnterEvent(self, event) -> None:
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:
+        urls = event.mimeData().urls()
+        if not urls:
+            return
+        local = urls[0].toLocalFile()
+        if local:
+            self.load_path(local)
+
+    # ------------------------------------------------------------------
+    # 数据流
+    # ------------------------------------------------------------------
+    def on_open(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择图片", "",
+            "图片文件 (*.png *.jpg *.jpeg *.bmp *.webp);;所有文件 (*.*)",
+        )
+        if path:
+            self.load_path(path)
+
+    def load_path(self, path: str) -> None:
+        try:
+            img = Image.open(path).convert("RGB")
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "打开失败", str(exc))
+            return
+        self.input_image = np.array(img)
+        h, w = self.input_image.shape[:2]
+        self.lbl_file.setText(Path(path).name)
+        self.view_input.set_image(self.input_image)
+        # 初始化目标尺寸 = 原图尺寸
+        self.spn_w.blockSignals(True)
+        self.spn_h.blockSignals(True)
+        self.spn_w.setValue(w)
+        self.spn_h.setValue(h)
+        self.spn_w.blockSignals(False)
+        self.spn_h.blockSignals(False)
+        self.dsp_scale.setValue(1.0)
+        self._refresh_preview()
+        self.btn_save_png.setEnabled(True)
+        self.btn_save_jpg.setEnabled(True)
+        self.status_message(f"已加载 {Path(path).name} ({w} × {h})")
+
+    # ------------------------------------------------------------------
+    # 信号回调
+    # ------------------------------------------------------------------
+    def _on_w_changed(self, w: int) -> None:
+        if self.input_image is None:
+            return
+        h0, w0 = self.input_image.shape[:2]
+        self.dsp_scale.blockSignals(True)
+        if w0:
+            self.dsp_scale.setValue(w / w0)
+        self.dsp_scale.blockSignals(False)
+        if self.chk_ratio.isChecked() and w0:
+            new_h = max(1, round(w * h0 / w0))
+            if new_h != self.spn_h.value():
+                self.spn_h.blockSignals(True)
+                self.spn_h.setValue(new_h)
+                self.spn_h.blockSignals(False)
+        self._refresh_preview()
+
+    def _on_h_changed(self, h: int) -> None:
+        if self.input_image is None:
+            return
+        h0, w0 = self.input_image.shape[:2]
+        self.dsp_scale.blockSignals(True)
+        if h0:
+            self.dsp_scale.setValue(h / h0)
+        self.dsp_scale.blockSignals(False)
+        if self.chk_ratio.isChecked() and h0:
+            new_w = max(1, round(h * w0 / h0))
+            if new_w != self.spn_w.value():
+                self.spn_w.blockSignals(True)
+                self.spn_w.setValue(new_w)
+                self.spn_w.blockSignals(False)
+        self._refresh_preview()
+
+    def _on_scale_changed(self, scale: float) -> None:
+        if self.input_image is None:
+            return
+        h0, w0 = self.input_image.shape[:2]
+        new_w = max(1, round(w0 * scale))
+        new_h = max(1, round(h0 * scale))
+        self.spn_w.blockSignals(True)
+        self.spn_h.blockSignals(True)
+        self.spn_w.setValue(new_w)
+        self.spn_h.setValue(new_h)
+        self.spn_w.blockSignals(False)
+        self.spn_h.blockSignals(False)
+        self._refresh_preview()
+
+    def _apply_scale_to_size(self) -> None:
+        # 显式「应用倍率」按钮:用当前 dsp_scale 重算一次
+        self._on_scale_changed(self.dsp_scale.value())
+
+    # ------------------------------------------------------------------
+    # 渲染与导出
+    # ------------------------------------------------------------------
+    def _current_output(self) -> np.ndarray | None:
+        if self.input_image is None:
+            return None
+        target_w = self.spn_w.value()
+        target_h = self.spn_h.value()
+        if target_w <= 0 or target_h <= 0:
+            return None
+        algo = SCALE_ALGORITHMS.get(self.cmb_algo.currentText(), cv2.INTER_NEAREST)
+        return cv2.resize(self.input_image, (target_w, target_h), interpolation=algo)
+
+    def _refresh_preview(self) -> None:
+        out = self._current_output()
+        if out is None:
+            return
+        self.view_output.set_image(out)
+        h, w = out.shape[:2]
+        algo = self.cmb_algo.currentText()
+        self.status_message(f"已缩放至 {w} × {h}  |  {algo}")
+
+    def _on_save(self, fmt: str) -> None:
+        out = self._current_output()
+        if out is None:
+            return
+        ext = "png" if fmt == "png" else "jpg"
+        filt = "PNG (*.png)" if fmt == "png" else "JPEG (*.jpg *.jpeg)"
+        default_name = f"scaled_{self.spn_w.value()}x{self.spn_h.value()}.{ext}"
+        path, _ = QFileDialog.getSaveFileName(
+            self, f"导出为 {ext.upper()}", default_name, filt,
+        )
+        if not path:
+            return
+        try:
+            pil = Image.fromarray(out)
+            if fmt == "jpg":
+                if pil.mode != "RGB":
+                    pil = pil.convert("RGB")
+                pil.save(path, "JPEG", quality=95)
+            else:
+                pil.save(path, "PNG")
+            self.last_saved_path = path
+            self.status_message(f"已导出 {path}")
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "导出失败", str(exc))
+
+    # ------------------------------------------------------------------
+    # 状态栏
+    # ------------------------------------------------------------------
+    def status_message(self, text: str) -> None:
+        win = self.window()
+        if isinstance(win, QMainWindow):
+            sb = win.statusBar()
+            if sb is not None:
+                sb.showMessage(text, 5000)
+
+
+# ---------------------------------------------------------------------------
 # 主窗口
 # ---------------------------------------------------------------------------
 
@@ -416,6 +703,10 @@ class MainWindow(QMainWindow):
         self.pixel_tab = PixelRefineWidget()
         self.tabs.addTab(self.pixel_tab, "🎨 像素细化")
 
+        # ------- 第二个工具 -------
+        self.scale_tab = ScaleWidget()
+        self.tabs.addTab(self.scale_tab, "📐 尺寸缩放")
+
         # ------- 预留 Tab: 后续添加工具的位置 -------
         placeholder = QWidget()
         ph_layout = QVBoxLayout(placeholder)
@@ -428,19 +719,19 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(self.tabs)
 
-        # ------- 工具栏快捷键 -------
+        # ------- 工具栏快捷键(按当前 Tab 分发) -------
         toolbar = QToolBar("主工具栏")
         toolbar.setIconSize(QSize(16, 16))
         self.addToolBar(toolbar)
 
         action_open = QAction("打开", self)
         action_open.setShortcut(QKeySequence.Open)
-        action_open.triggered.connect(self.pixel_tab.on_open)
+        action_open.triggered.connect(self._dispatch_open)
         toolbar.addAction(action_open)
 
         action_save = QAction("保存", self)
         action_save.setShortcut(QKeySequence.Save)
-        action_save.triggered.connect(self.pixel_tab.on_save)
+        action_save.triggered.connect(self._dispatch_save)
         toolbar.addAction(action_save)
 
         # ------- 状态栏 -------
@@ -453,6 +744,27 @@ class MainWindow(QMainWindow):
     def register_tab(self, widget: QWidget, title: str) -> None:
         """未来新增工具时调用:self.register_tab(NewToolWidget(), '去水印')"""
         self.tabs.insertTab(self.tabs.count() - 1, widget, title)
+
+    # ------------------------------------------------------------------
+    # 工具栏快捷键:按当前 Tab 分发
+    # ------------------------------------------------------------------
+    def _current_widget(self) -> QWidget | None:
+        return self.tabs.currentWidget()
+
+    def _dispatch_open(self) -> None:
+        w = self._current_widget()
+        if w is not None and hasattr(w, "on_open"):
+            w.on_open()
+
+    def _dispatch_save(self) -> None:
+        w = self._current_widget()
+        if w is None:
+            return
+        # 像素细化 Tab -> on_save;尺寸缩放 Tab -> 默认导出 PNG
+        if hasattr(w, "on_save"):
+            w.on_save()
+        elif hasattr(w, "_on_save"):
+            w._on_save("png")
 
 
 # ---------------------------------------------------------------------------
