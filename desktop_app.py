@@ -238,12 +238,15 @@ class PixelRefineWidget(QWidget):
     def on_refine_done(self, w: int, h: int, out: np.ndarray) -> None:
         self.output_image = out
         self.view_output.set_image(out)
-        self.view_preview.set_image(resize_nearest(out, self.spn_scale.value()))
+        scale = self.spn_scale.value()
+        preview = resize_nearest(out, scale)
+        self.view_preview.set_image(preview)
+        self.view_preview.info_label.setText(f"{w * scale} × {h * scale} px ({scale}×)")
         self.btn_run.setEnabled(True)
         self.btn_run.setText("生成像素图")
         self.btn_save.setEnabled(True)
         self.status_message(
-            f"网格 {w} × {h}  |  预览 {self.spn_scale.value()}×  "
+            f"网格 {w} × {h}  |  预览 {scale}×  "
             f"|  采样 {self.cmb_sample.currentText()}"
         )
 
@@ -303,6 +306,10 @@ class ImageView(QWidget):
         header.addWidget(self.title_label)
         header.addStretch(1)
 
+        self.info_label = QLabel("")
+        self.info_label.setStyleSheet("color: #c33; font-weight: bold; font-size: 12px;")
+        header.addWidget(self.info_label)
+
         self.btn_fit = QPushButton("适应")
         self.btn_fit.setFixedWidth(56)
         self.btn_fit.clicked.connect(self.fit_to_view)
@@ -332,6 +339,8 @@ class ImageView(QWidget):
     # ------------------------------------------------------------------
     def set_image(self, arr: np.ndarray) -> None:
         self._pixmap = numpy_to_qpixmap(arr)
+        h, w = arr.shape[:2]
+        self.info_label.setText(f"{w} × {h} px")
         self._apply()
 
     def clear(self) -> None:
@@ -339,6 +348,7 @@ class ImageView(QWidget):
         self._label.setPixmap(QPixmap())
         self._label.setText("(无图片)")
         self._label.resize(self.size())
+        self.info_label.setText("")
 
     def fit_to_view(self) -> None:
         if self._pixmap is None:
