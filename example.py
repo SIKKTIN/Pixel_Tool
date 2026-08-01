@@ -1,4 +1,6 @@
 import cv2
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from src.perfect_pixel import get_perfect_pixel
 
@@ -16,7 +18,7 @@ if bgr is None:
     raise FileNotFoundError(f"Cannot read image: {path}")
 rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
-w, h, out = get_perfect_pixel(rgb, sample_method="center", refine_intensity=0.3, debug=True)
+w, h, out = get_perfect_pixel(rgb, sample_method="center", refine_intensity=0.3, debug=False)
 
 if w is None or h is None:
     print("Failed to generate pixel-perfect image.")
@@ -34,7 +36,9 @@ plt.title(f"Pixel-perfect ({w}×{h})")
 plt.imshow(out)
 plt.axis("off")
 
-plt.show()
+plt.tight_layout()
+plt.savefig("compare.png", dpi=120)
+plt.close()
 
 # save output
 out_bgr = cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
