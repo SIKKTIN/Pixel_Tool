@@ -60,13 +60,26 @@ _MODEL_DIR = Path(LAMA_MODEL_PATH).parent
 # ---------------------------------------------------------------------------
 
 def numpy_to_qpixmap(arr: np.ndarray) -> QPixmap:
-    """H x W x 3 uint8 -> QPixmap (RGB)."""
+    """H x W x 3/4 uint8 -> QPixmap。RGBA 时自动画棋盘格底再合成。"""
     if arr.ndim == 2:
         arr = np.stack([arr] * 3, axis=-1)
-    if arr.shape[-1] == 4:
-        arr = arr[..., :3]
-    h, w, _ = arr.shape
-    qimg = QImage(arr.data, w, h, 3 * w, QImage.Format_RGB888).copy()
+    arr = np.ascontiguousarray(arr, dtype=np.uint8)
+
+    h, w = arr.shape[:2]
+    if arr.shape[2] == 4:
+        # 棋盘格背景 16x16，格灰/白 = 204/232
+        chk = np.zeros((h, w, 3), dtype=np.uint8)
+        tile = 16
+        for row in range(h):
+            for col in range(w):
+                chk[row, col] = [204, 232][((row // tile) + (col // tile)) % 2]
+        a = arr[:, :, 3:4].astype(np.float32) / 255.0
+        chk = chk.astype(np.float32)
+        rgb = arr[:, :, :3].astype(np.float32)
+        blended = (rgb * a + chk * (1 - a)).astype(np.uint8)
+        qimg = QImage(blended.data, w, h, 3 * w, QImage.Format_RGB888).copy()
+    else:
+        qimg = QImage(arr.data, w, h, 3 * w, QImage.Format_RGB888).copy()
     return QPixmap.fromImage(qimg)
 
 
@@ -78,10 +91,10 @@ def bgr_to_rgb(arr: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
 
 
-def load_image_rgb(path: str) -> np.ndarray:
-    """支持中文路径的 RGB 读取."""
-    img = Image.open(path).convert("RGB")
-    return np.array(img)
+def load_image_rgba(path: str) -> np.ndarray:
+    """支持中文路径的 RGBA 读取."""
+    img = Image.open(path).convert("RGBA")
+    return np.array(img, dtype=np.uint8)
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +113,8 @@ class SlbrWorker(QThread):
 
     def run(self) -> None:
         try:
-            image_bgr = cv2.cvtColor(self.image_rgb, cv2.COLOR_RGB2BGR)
+            image_rgb = _ensure_rgb(self.image_rgb)
+            image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
             runner = SlbrRunner(model_dir=_MODEL_DIR, device="cuda" if _cuda_available() else "cpu")
             if not runner.installed:
                 self.failed.emit(f"SLBR 模型未找到: {runner.checkpoint_path}")
@@ -127,8 +141,9 @@ class LamaWorker(QThread):
 
     def run(self) -> None:
         try:
+            image_rgb = _ensure_rgb(self.image_rgb)
             model = LaMaModel(device="cuda" if _cuda_available() else "cpu")
-            result_bgr = model(self.image_rgb, self.mask_gray)
+            result_bgr = model(image_rgb, self.mask_gray)
             self.finished_ok.emit(bgr_to_rgb(result_bgr))
         except Exception as exc:
             logger.exception("LaMa inference failed")
@@ -141,6 +156,22 @@ def _cuda_available() -> bool:
         return torch.cuda.is_available()
     except Exception:
         return False
+
+
+def _ensure_rgb(image: np.ndarray) -> np.ndarray:
+    """将 RGBA / 单通道图统一降为 HxWx3 RGB。
+
+    SLBR/LaMa 等模型第一层卷积都写死 3 通道输入,带 alpha 的 PNG
+    直接喂入会触发 conv2d 维度错或 cv2 转换失败。
+    """
+    if image.ndim == 3 and image.shape[2] == 4:
+        rgb = image[..., :3].astype(np.float32)
+        a = image[..., 3:4].astype(np.float32) / 255.0
+        out = rgb * a + 255.0 * (1.0 - a)
+        return np.clip(out, 0, 255).astype(image.dtype)
+    if image.ndim == 2:
+        return np.stack([image, image, image], axis=-1)
+    return image
 
 
 def _push_to_buffer(image: np.ndarray, source_tab: str) -> None:
@@ -199,7 +230,7 @@ class MaskCanvas(QWidget):
     # ------------------------------------------------------------------
     def set_image(self, image_rgb: np.ndarray):
         self._pixmap = numpy_to_qpixmap(image_rgb)
-        h, w, _ = image_rgb.shape
+        h, w = image_rgb.shape[:2]
         # 蒙版层(原图尺寸): 全透明
         self._mask_pixmap = QPixmap(w, h)
         self._mask_pixmap.fill(Qt.transparent)
@@ -454,6 +485,12 @@ class ZoomImageLabel(QLabel):
         self._fit()
         self.update()
 
+    def set_image_with_alpha(self, rgba: np.ndarray):
+        """RGBA ndarray -> 带棋盘格背景的 QPixmap."""
+        self._pixmap = numpy_to_qpixmap(rgba)
+        self._fit()
+        self.update()
+
     def clear(self):
         super().clear()
         self._pixmap = None
@@ -577,6 +614,11 @@ class ResultPanel(QWidget):
         for b in (self.btn_orig, self.btn_result, self.btn_mask):
             b.setFixedWidth(60)
             bar.addWidget(b)
+        self.view_group = QButtonGroup(self)
+        self.view_group.setExclusive(True)
+        self.view_group.addButton(self.btn_orig, 0)
+        self.view_group.addButton(self.btn_result, 1)
+        self.view_group.addButton(self.btn_mask, 2)
         v.addLayout(bar)
 
         self.stack = QStackedWidget()
@@ -596,6 +638,12 @@ class ResultPanel(QWidget):
         self._images["orig"] = rgb
         self.lbl_orig.set_image(rgb)
         h, w, _ = rgb.shape
+        self.title.setText(f"{w} × {h} px")
+
+    def set_original_with_alpha(self, rgba: np.ndarray):
+        self._images["orig"] = rgba
+        self.lbl_orig.set_image_with_alpha(rgba)
+        h, w, _ = rgba.shape
         self.title.setText(f"{w} × {h} px")
 
     def set_result(self, rgb: np.ndarray):
@@ -822,7 +870,7 @@ class WatermarkWidget(QWidget):
 
     def load_path(self, path: str):
         try:
-            self.input_image = load_image_rgb(path)
+            self.input_image = load_image_rgba(path)
         except Exception as exc:
             QMessageBox.critical(self, "打开失败", str(exc))
             return
@@ -833,11 +881,15 @@ class WatermarkWidget(QWidget):
         self.btn_save.setEnabled(False)
         self.btn_run.setEnabled(True)
 
-        # 更新画布
-        self.mask_canvas.set_image(self.input_image)
+        # 更新画布（RGBA 时保留 alpha 渲染棋盘格）
+        img = self.input_image
+        self.mask_canvas.set_image(img)
         self.mask_canvas.clear_mask()
         self.result_panel.clear_all()
-        self.result_panel.set_original(self.input_image)
+        if img.ndim == 3 and img.shape[2] == 4:
+            self.result_panel.set_original_with_alpha(img)
+        else:
+            self.result_panel.set_original(img)
 
         # LaMa 模式下允许清除蒙版按钮
         is_lama = self.mode_buttons["lama"].isChecked()
@@ -883,26 +935,34 @@ class WatermarkWidget(QWidget):
             self.status_message("SLBR 推理中…")
 
     def _on_slbr_done(self, clean_rgb: np.ndarray, mask_rgb: np.ndarray):
-        self.result_image = clean_rgb
+        # 保留原图 alpha 通道
+        if self.input_image.shape[2] == 4:
+            clean_rgba = np.dstack([clean_rgb, self.input_image[:, :, 3]])
+        else:
+            clean_rgba = clean_rgb
+        self.result_image = clean_rgba
         self.result_panel.set_result(clean_rgb)
         self.result_panel.set_mask(mask_rgb)
         self.btn_run.setEnabled(True)
         self.btn_run.setText("开始处理")
         self.btn_save.setEnabled(True)
-        # 推入暂存区
-        _push_to_buffer(clean_rgb, "去水印(SLBR)")
+        _push_to_buffer(clean_rgba, "去水印(SLBR)")
         self.status_message(
             f"SLBR 完成  |  输出 {clean_rgb.shape[1]} × {clean_rgb.shape[0]} px"
         )
 
     def _on_lama_done(self, result_rgb: np.ndarray):
-        self.result_image = result_rgb
+        # 保留原图 alpha 通道
+        if self.input_image.shape[2] == 4:
+            result_rgba = np.dstack([result_rgb, self.input_image[:, :, 3]])
+        else:
+            result_rgba = result_rgb
+        self.result_image = result_rgba
         self.result_panel.set_result(result_rgb)
         self.btn_run.setEnabled(True)
         self.btn_run.setText("开始处理")
         self.btn_save.setEnabled(True)
-        # 推入暂存区
-        _push_to_buffer(result_rgb, "去水印(LaMa)")
+        _push_to_buffer(result_rgba, "去水印(LaMa)")
         self.status_message(
             f"LaMa 完成  |  输出 {result_rgb.shape[1]} × {result_rgb.shape[0]} px"
         )
@@ -954,7 +1014,10 @@ class WatermarkWidget(QWidget):
         self.mask_canvas.set_image(image)
         self.mask_canvas.clear_mask()
         self.result_panel.clear_all()
-        self.result_panel.set_original(image)
+        if image.ndim == 3 and image.shape[2] == 4:
+            self.result_panel.set_original_with_alpha(image)
+        else:
+            self.result_panel.set_original(image)
         h, w = image.shape[:2]
         is_lama = self.mode_buttons["lama"].isChecked()
         self.btn_clear_mask.setEnabled(is_lama)

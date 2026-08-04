@@ -22,6 +22,7 @@ from PySide6.QtGui import QAction, QImage, QPixmap, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QColorDialog,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -31,6 +32,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSizePolicy,
@@ -229,6 +231,8 @@ class ImageTrayWidget(QWidget):
                 w = _ThumbItem(item, self._buf.active_id, self)
                 w.clicked.connect(self._on_thumb_click)
                 w.double_clicked.connect(self._on_thumb_dclick)
+                w.save_requested.connect(self._on_thumb_save)
+                w.delete_requested.connect(self._on_thumb_delete)
                 self._thumb_widgets[item["id"]] = w
                 row_layout.addWidget(w)
             # 不足一列时用空白 widget 填充，勿用 stretch（会撑大整行）
@@ -259,6 +263,48 @@ class ImageTrayWidget(QWidget):
         self._buf.set_active(item_id)
         self.load_request.emit(item_id)
 
+    def _on_thumb_save(self, item_id: str) -> None:
+        arr = self._buf.get_by_id(item_id)
+        if arr is None:
+            return
+        # 找到来源信息作为默认文件名
+        source_file = ""
+        for it in self._buf.items():
+            if it["id"] == item_id:
+                source_file = it.get("source_file", "") or it.get("source_tab", "")
+                break
+        default_name = (Path(source_file).stem if source_file else "image") + ".png"
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "保存图片",
+            default_name,
+            "PNG (*.png);;JPEG (*.jpg *.jpeg);;所有文件 (*.*)",
+        )
+        if not path:
+            return
+        try:
+            if arr.ndim == 2:
+                img = Image.fromarray(arr)
+            else:
+                img = Image.fromarray(arr[:, :, :3] if arr.shape[2] == 4 else arr)
+            ext = Path(path).suffix.lower()
+            if ext in (".jpg", ".jpeg"):
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                img.save(path, "JPEG", quality=95)
+            elif ext == ".png":
+                if arr.ndim == 3 and arr.shape[2] == 4:
+                    img.save(path, "PNG")
+                else:
+                    img.save(path, "PNG")
+            else:
+                img.save(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "保存失败", str(exc))
+
+    def _on_thumb_delete(self, item_id: str) -> None:
+        self._buf.remove(item_id)
+
     def _on_clear(self) -> None:
         self._buf.clear()
 
@@ -287,6 +333,8 @@ class _ThumbItem(QWidget):
 
     clicked = Signal(str)
     double_clicked = Signal(str)
+    save_requested = Signal(str)
+    delete_requested = Signal(str)
 
     THUMB = ImageTrayWidget.THUMB_SIZE
     PADDING = 4
@@ -311,7 +359,7 @@ class _ThumbItem(QWidget):
 
         self._lbl_size = QLabel(item["size_text"], self)
         self._lbl_size.setAlignment(Qt.AlignCenter)
-        self._lbl_size.setStyleSheet("font-size: 10px; color: #888; background: transparent; border: none;")
+        self._lbl_size.setStyleSheet("font-size: 10px; color: #666; background: transparent; border: none;")
         self._lbl_size.setFixedWidth(self.THUMB - 2)
         self._lbl_size.move(1, self.THUMB)
 
@@ -323,9 +371,15 @@ class _ThumbItem(QWidget):
         h, w = arr.shape[:2]
         scale = thumb_h / max(h, w)
         tw, th = int(w * scale), int(h * scale)
+
         img = Image.fromarray(arr)
         img_small = img.resize((tw, th), Image.LANCZOS)
-        qimg = QImage(img_small.tobytes(), tw, th, 3 * tw, QImage.Format_RGB888).copy()
+
+        if arr.shape[2] == 4:
+            qimg = QImage(img_small.tobytes(), tw, th, 4 * tw, QImage.Format_RGBA8888).copy()
+        else:
+            qimg = QImage(img_small.tobytes(), tw, th, 3 * tw, QImage.Format_RGB888).copy()
+
         pix = QPixmap.fromImage(qimg)
         self._lbl_img.setPixmap(pix)
 
@@ -333,7 +387,7 @@ class _ThumbItem(QWidget):
         if self._is_active:
             self.setStyleSheet(
                 "border: 2px solid #4caf50; border-radius: 6px; "
-                "background: #1e3a1e;"
+                "background: #e8f5e9;"
             )
         else:
             self.setStyleSheet(
@@ -365,6 +419,15 @@ class _ThumbItem(QWidget):
             self.double_clicked.emit(self._item_id)
         super().mouseDoubleClickEvent(event)
 
+    def contextMenuEvent(self, event) -> None:
+        menu = QMenu(self)
+        act_save = menu.addAction("保存…")
+        act_save.triggered.connect(lambda: self.save_requested.emit(self._item_id))
+        menu.addSeparator()
+        act_delete = menu.addAction("删除")
+        act_delete.triggered.connect(lambda: self.delete_requested.emit(self._item_id))
+        menu.exec(event.globalPos())
+
 
 # 把 src/ 加入 sys.path，使 watermark_remover 子包和 perfect_pixel 可直接 import
 _PROJECT_ROOT = Path(__file__).resolve().parent
@@ -380,13 +443,27 @@ from perfect_pixel import get_perfect_pixel
 # ---------------------------------------------------------------------------
 
 def numpy_to_qpixmap(arr: np.ndarray) -> QPixmap:
-    """H x W x 3 uint8 -> QPixmap。"""
+    """H x W x 3/4 uint8 -> QPixmap。RGBA 时自动画棋盘格底再合成。"""
     if arr.ndim == 2:
         arr = np.stack([arr] * 3, axis=-1)
-    if arr.shape[-1] == 4:
-        arr = arr[..., :3]
-    h, w, _ = arr.shape
-    qimg = QImage(arr.data, w, h, 3 * w, QImage.Format_RGB888).copy()
+    arr = np.ascontiguousarray(arr, dtype=np.uint8)
+
+    h, w = arr.shape[:2]
+    if arr.shape[2] == 4:
+        # 棋盘格背景 16x16，格灰/白 = 204/232
+        chk = np.zeros((h, w, 3), dtype=np.uint8)
+        tile = 16
+        for row in range(h):
+            for col in range(w):
+                chk[row, col] = [204, 232][((row // tile) + (col // tile)) % 2]
+        # 合成：前景用 alpha 加权叠加
+        a = arr[:, :, 3:4].astype(np.float32) / 255.0
+        chk = chk.astype(np.float32)
+        rgb = arr[:, :, :3].astype(np.float32)
+        blended = (rgb * a + chk * (1 - a)).astype(np.uint8)
+        qimg = QImage(blended.data, w, h, 3 * w, QImage.Format_RGB888).copy()
+    else:
+        qimg = QImage(arr.data, w, h, 3 * w, QImage.Format_RGB888).copy()
     return QPixmap.fromImage(qimg)
 
 
@@ -539,7 +616,7 @@ class PixelRefineWidget(QWidget):
 
     def load_path(self, path: str) -> None:
         try:
-            img = Image.open(path).convert("RGB")
+            img = Image.open(path).convert("RGBA")
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "打开失败", str(exc))
             return
@@ -611,8 +688,8 @@ class PixelRefineWidget(QWidget):
 
     def load_from_buffer(self, image: np.ndarray) -> None:
         """从暂存区双击接收一张图片，作为新的输入原图。"""
-        self.input_image = image
-        self.view_input.set_image(image)
+        self.input_image = np.ascontiguousarray(image, dtype=np.uint8)
+        self.view_input.set_image(self.input_image)
         self.view_output.clear()
         self.view_preview.clear()
         self.output_image = None
@@ -904,7 +981,7 @@ class ScaleWidget(QWidget):
 
     def load_path(self, path: str) -> None:
         try:
-            img = Image.open(path).convert("RGB")
+            img = Image.open(path).convert("RGBA")
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "打开失败", str(exc))
             return
@@ -1032,7 +1109,7 @@ class ScaleWidget(QWidget):
 
     def load_from_buffer(self, image: np.ndarray) -> None:
         """从暂存区双击接收一张图片，作为新的输入原图。"""
-        self.input_image = image
+        self.input_image = np.ascontiguousarray(image, dtype=np.uint8)
         h, w = self.input_image.shape[:2]
         self.lbl_file.setText("(暂存区)")
         self.view_input.set_image(image)
@@ -1062,6 +1139,348 @@ class ScaleWidget(QWidget):
 # ---------------------------------------------------------------------------
 # 主窗口
 # ---------------------------------------------------------------------------
+
+class BackgroundRemoverWidget(QWidget):
+    """背景透明度去除工具: 自动采样四角背景色，计算 alpha 遮罩并输出。"""
+
+    _buf: "ImageBuffer | None" = None
+
+    @staticmethod
+    def set_buffer_ref(buf: "ImageBuffer | None") -> None:
+        BackgroundRemoverWidget._buf = buf
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+
+        self.input_image: np.ndarray | None = None  # 原始 RGBA uint8 (显示用)
+        self.input_rgb: np.ndarray | None = None   # RGB uint8 (去背景计算用)
+        self.bg_color: np.ndarray | None = None      # BGR uint8
+        self.last_saved_path: str | None = None
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(10)
+
+        # ---- 顶部控件栏 --------------------------------------------------
+        ctrl_row = QHBoxLayout()
+        ctrl_row.setSpacing(8)
+
+        self.btn_open = QPushButton("打开图片…")
+        self.btn_open.clicked.connect(self._on_open)
+        ctrl_row.addWidget(self.btn_open)
+
+        self.lbl_file = QLabel("未选择文件")
+        self.lbl_file.setStyleSheet("color: #666;")
+        ctrl_row.addWidget(self.lbl_file, 1)
+
+        self.btn_detect = QPushButton("重新采样背景色")
+        self.btn_detect.clicked.connect(self._detect_bg)
+        self.btn_detect.setEnabled(False)
+        ctrl_row.addWidget(self.btn_detect)
+
+        ctrl_row.addStretch(1)
+        root.addLayout(ctrl_row)
+
+        # ---- 左右分栏:参数 + 预览 -----------------------------------------
+        body = QHBoxLayout()
+        body.setSpacing(10)
+
+        # 左:参数面板
+        param_box = QGroupBox("去背景参数")
+        form = QFormLayout(param_box)
+        form.setContentsMargins(10, 14, 10, 10)
+        form.setSpacing(8)
+
+        self.spn_tolerance = QSpinBox()
+        self.spn_tolerance.setRange(1, 255)
+        self.spn_tolerance.setValue(30)
+        self.spn_tolerance.setFixedWidth(100)
+        self.spn_tolerance.valueChanged.connect(self._refresh_preview)
+        form.addRow("容差:", self.spn_tolerance)
+
+        self.spn_feather = QSpinBox()
+        self.spn_feather.setRange(0, 20)
+        self.spn_feather.setValue(2)
+        self.spn_feather.setFixedWidth(100)
+        self.spn_feather.valueChanged.connect(self._refresh_preview)
+        form.addRow("边缘羽化:", self.spn_feather)
+
+        # 背景色选择
+        self._bg_color_label = QLabel()
+        self._bg_color_label.setFixedSize(60, 24)
+        self._bg_color_label.setStyleSheet("background: #ffffff; border: 1px solid #888;")
+        self._bg_color_preview = np.array([255, 255, 255], dtype=np.uint8)
+        self._bg_color_btn = QPushButton("拾取背景色")
+        self._bg_color_btn.setFixedWidth(120)
+        self._bg_color_btn.clicked.connect(self._pick_bg_color)
+        hl = QHBoxLayout()
+        hl.addWidget(self._bg_color_label)
+        hl.addWidget(self._bg_color_btn)
+        hl.addStretch(1)
+        form.addRow("替换背景:", hl)
+
+        # 背景色预设
+        presets_hl = QHBoxLayout()
+        for color, hex_val in [("白", "#ffffff"), ("黑", "#000000"), ("checker", None)]:
+            btn = QPushButton(color)
+            btn.setFixedWidth(50)
+            btn.clicked.connect(
+                lambda checked, h=hex_val: self._set_bg_color_preset(h)
+            )
+            presets_hl.addWidget(btn)
+        form.addRow("", presets_hl)
+
+        self.btn_export_png = QPushButton("导出 PNG (含透明)")
+        self.btn_export_png.clicked.connect(self._export_png)
+        self.btn_export_png.setEnabled(False)
+        form.addRow("", self.btn_export_png)
+
+        self.btn_export_rgb = QPushButton("导出 RGB (替换背景)")
+        self.btn_export_rgb.clicked.connect(self._export_rgb)
+        self.btn_export_rgb.setEnabled(False)
+        form.addRow("", self.btn_export_rgb)
+
+        self.btn_add_to_tray = QPushButton("加入暂存区")
+        self.btn_add_to_tray.clicked.connect(self._push_to_buffer)
+        self.btn_add_to_tray.setEnabled(False)
+        form.addRow("", self.btn_add_to_tray)
+
+        body.addWidget(param_box, 0)
+
+        # 右:双图预览
+        preview_wrap = QVBoxLayout()
+        preview_wrap.setSpacing(10)
+        self.view_input = ImageView("原图")
+        self.view_output = ImageView("透明预览 (棋盘格)")
+        preview_wrap.addWidget(self.view_input, 1)
+        preview_wrap.addWidget(self.view_output, 1)
+        preview_wrap_w = QWidget()
+        preview_wrap_w.setLayout(preview_wrap)
+        body.addWidget(preview_wrap_w, 1)
+        root.addLayout(body, 1)
+
+        self.setAcceptDrops(True)
+
+    # ------------------------------------------------------------------
+    # 拖拽
+    # ------------------------------------------------------------------
+    def dragEnterEvent(self, event) -> None:
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:
+        urls = event.mimeData().urls()
+        if not urls:
+            return
+        local = urls[0].toLocalFile()
+        if local.lower().endswith((".png", ".jpg", ".jpeg", ".bmp", ".webp")):
+            self._load_path(local)
+
+    # ------------------------------------------------------------------
+    # 内部逻辑
+    # ------------------------------------------------------------------
+    def _on_open(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "打开图片", "", "图片文件 (*.png *.jpg *.jpeg *.bmp *.webp)"
+        )
+        if path:
+            self._load_path(path)
+
+    def _load_path(self, path: str) -> None:
+        try:
+            img = Image.open(path).convert("RGBA")
+            self.input_image = np.array(img, dtype=np.uint8)  # 保留原始 RGBA
+            self.input_rgb = self.input_image[..., :3]        # RGB 用于去背景计算
+            name = os.path.basename(path)
+            self.lbl_file.setText(name)
+            self._detect_bg()
+            self.btn_detect.setEnabled(True)
+            self.btn_export_png.setEnabled(True)
+            self.btn_export_rgb.setEnabled(True)
+            self.btn_add_to_tray.setEnabled(True)
+            self.view_input.set_image(self.input_image)
+            self._refresh_preview()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "加载失败", str(exc))
+
+    def _detect_bg(self) -> None:
+        """自动采样四角中心区域的平均颜色作为背景色。"""
+        if self.input_rgb is None:
+            return
+        h, w = self.input_rgb.shape[:2]
+        margin = 8
+        patches = np.array([
+            self.input_rgb[margin:margin + 20, margin:margin + 20].reshape(-1, 3),
+            self.input_rgb[margin:margin + 20, w - margin - 20:w - margin].reshape(-1, 3),
+            self.input_rgb[h - margin - 20:h - margin, margin:margin + 20].reshape(-1, 3),
+            self.input_rgb[h - margin - 20:h - margin, w - margin - 20:w - margin].reshape(-1, 3),
+        ])
+        self.bg_color = patches.mean(axis=(0, 1)).astype(np.uint8)
+        self._update_bg_color_ui()
+
+    def _update_bg_color_ui(self) -> None:
+        if self.bg_color is None:
+            return
+        b, g, r = self.bg_color
+        self._bg_color_preview = np.array([b, g, r], dtype=np.uint8)
+        self._bg_color_label.setStyleSheet(f"background: rgb({r},{g},{b}); border: 1px solid #888;")
+
+    def _set_bg_color_preset(self, hex_val: str | None) -> None:
+        if hex_val is None:
+            self._bg_color_preview = None  # checkerboard
+            self._bg_color_label.setStyleSheet("background: repeating-conic-gradient(#fff 0% 25%, #ddd 0% 50%) 50 / 16px 16px; border: 1px solid #888;")
+            self._refresh_preview()
+            return
+        r = int(hex_val[1:3], 16)
+        g = int(hex_val[3:5], 16)
+        b = int(hex_val[5:7], 16)
+        self._bg_color_preview = np.array([b, g, r], dtype=np.uint8)
+        self._bg_color_label.setStyleSheet(f"background: {hex_val}; border: 1px solid #888;")
+        self._refresh_preview()
+
+    def _pick_bg_color(self) -> None:
+        """在原图上点一下，用该点颜色作为背景色。"""
+        if self.input_image is None:
+            return
+        msg = QMessageBox(self)
+        msg.setWindowTitle("拾取背景色")
+        msg.setText("点击「OK」后，请在原图上点击一个背景色位置。")
+        msg.setStandardButtons(QMessageBox.Ok)
+        msg.exec()
+
+        # 用事件过滤捕获点击（简化：直接在预览图上模拟）
+        # 这里直接弹出颜色对话框
+        color = QColorDialog.getColor(parent=self)
+        if color.isValid():
+            self._bg_color_preview = np.array([color.blue(), color.green(), color.red()], dtype=np.uint8)
+            self.bg_color = self._bg_color_preview.copy()
+            self._update_bg_color_ui()
+            self._refresh_preview()
+
+    def _compute_alpha(self, img: np.ndarray, bg: np.ndarray) -> np.ndarray:
+        """计算 alpha 遮罩: 0=背景, 255=前景，中间值做羽化。"""
+        diff = np.sqrt(np.sum((img.astype(float) - bg) ** 2, axis=2))
+        tol = self.spn_tolerance.value()
+        feather = self.spn_feather.value()
+
+        if feather == 0:
+            alpha = np.where(diff > tol, 255, 0).astype(np.uint8)
+        else:
+            alpha = np.clip((diff - tol + feather) / (2 * feather) * 255, 0, 255)
+            alpha = np.where(diff <= tol - feather, 0, alpha)
+            alpha = np.where(diff >= tol + feather, 255, alpha)
+            alpha = alpha.astype(np.uint8)
+
+        return alpha
+
+    def _apply_bg_removal(self, img: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """返回 (RGBA图片, alpha通道)。"""
+        if self.bg_color is None:
+            self._detect_bg()
+        bg = self.bg_color if self.bg_color is not None else np.array([255, 255, 255], dtype=np.uint8)
+        alpha = self._compute_alpha(img, bg)
+        rgba = np.dstack([img, alpha])
+        return rgba, alpha
+
+    def _refresh_preview(self) -> None:
+        if self.input_rgb is None:
+            return
+        rgba, alpha = self._apply_bg_removal(self.input_rgb)
+        self._display_alpha_preview(rgba)
+        self.status_message(f"前景比例: {np.mean(alpha) / 255 * 100:.1f}%")
+
+    def _display_alpha_preview(self, rgba: np.ndarray) -> None:
+        """用棋盘格背景叠加 RGBA 显示预览。"""
+        h, w = rgba.shape[:2]
+        cell = 8
+        cb = np.zeros((h, w, 3), dtype=np.uint8)
+        for r in range(h):
+            for c in range(w):
+                b1 = ((r // cell) + (c // cell)) % 2 == 0
+                cb[r, c] = [200, 200, 200] if b1 else [120, 120, 120]
+
+        a = rgba[:, :, 3:4].astype(float) / 255.0
+        fg = rgba[:, :, :3].astype(float)
+        blended = (fg * a + cb * (1 - a)).astype(np.uint8)
+        self.view_output.set_image(blended)
+
+    def load_from_buffer(self, image: np.ndarray) -> None:
+        self.input_image = np.ascontiguousarray(image, dtype=np.uint8)
+        self.input_rgb = self.input_image[..., :3] if self.input_image.shape[2] == 4 else self.input_image
+        self.lbl_file.setText("(暂存区)")
+        self.btn_detect.setEnabled(True)
+        self.btn_export_png.setEnabled(True)
+        self.btn_export_rgb.setEnabled(True)
+        self.btn_add_to_tray.setEnabled(True)
+        self.view_input.set_image(image)
+        self._detect_bg()
+        self._refresh_preview()
+
+    def status_message(self, msg: str) -> None:
+        win = self.window()
+        if win is not None and hasattr(win, "statusBar"):
+            sb = win.statusBar()
+            if sb is not None:
+                sb.showMessage(msg)
+
+    # ------------------------------------------------------------------
+    # 导出
+    # ------------------------------------------------------------------
+    def _export_png(self) -> None:
+        if self.input_rgb is None:
+            return
+        rgba, alpha = self._apply_bg_removal(self.input_rgb)
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出 PNG", self.last_saved_path or "", "PNG (*.png)"
+        )
+        if not path:
+            return
+        try:
+            pil_img = Image.fromarray(rgba, mode="RGBA")
+            pil_img.save(path, "PNG")
+            self.last_saved_path = path
+            self.status_message(f"已导出 {path}")
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "导出失败", str(exc))
+
+    def _export_rgb(self) -> None:
+        if self.input_rgb is None:
+            return
+        rgba, alpha = self._apply_bg_removal(self.input_rgb)
+        bg = self._bg_color_preview
+        if bg is None:
+            bg = np.array([255, 255, 255], dtype=np.uint8)
+
+        h, w = rgba.shape[:2]
+        b, g, r = bg
+        rgb = rgba[:, :, :3].copy()
+        a = alpha[:, :, None].astype(float) / 255.0
+        bg_img = np.full((h, w, 3), (b, g, r), dtype=np.uint8)
+        rgb = (rgb * a + bg_img * (1 - a)).astype(np.uint8)
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出图片", self.last_saved_path or "", "PNG (*.png);;JPEG (*.jpg)"
+        )
+        if not path:
+            return
+        try:
+            pil_img = Image.fromarray(rgb)
+            if path.lower().endswith(".jpg"):
+                pil_img.save(path, "JPEG", quality=95)
+            else:
+                pil_img.save(path, "PNG")
+            self.last_saved_path = path
+            self.status_message(f"已导出 {path}")
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "导出失败", str(exc))
+
+    def _push_to_buffer(self) -> None:
+        if self.input_rgb is None or self._buf is None:
+            return
+        rgba, _ = self._apply_bg_removal(self.input_rgb)
+        self._buf.push(rgba, source_tab="去背景")
+        self.status_message("已加入暂存区")
+
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
@@ -1107,6 +1526,11 @@ class MainWindow(QMainWindow):
             ph_label.setWordWrap(True)
             ph_layout.addWidget(ph_label)
             self.tabs.addTab(placeholder_wm, "🪄 去水印")
+
+        # ------- 去背景 Tab -------
+        self.bg_tab = BackgroundRemoverWidget()
+        self.tabs.addTab(self.bg_tab, "🎭 去背景")
+        BackgroundRemoverWidget.set_buffer_ref(image_buffer())
 
         # ------- 预留 Tab -------
         placeholder = QWidget()

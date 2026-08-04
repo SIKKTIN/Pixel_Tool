@@ -118,6 +118,19 @@ def load_jit_model(model_path, device):
     return model
 
 
+def _rgba_to_rgb(img: np.ndarray) -> np.ndarray:
+    """RGBA → RGB:alpha=255 视为不透明直接取 RGB;否则合成到白底。
+
+    LaMa / SLBR 等修复模型期望 HxWx3,避免传入 4 通道触发 conv2d 维度错误。
+    """
+    if img.ndim != 3 or img.shape[2] != 4:
+        return img
+    rgb = img[..., :3].astype(np.float32)
+    a = img[..., 3:4].astype(np.float32) / 255.0
+    out = rgb * a + 255.0 * (1.0 - a)
+    return np.clip(out, 0, 255).astype(img.dtype)
+
+
 class LaMaModel:
     """LaMa 蒙版修复模型 (big-lama.pt)."""
 
@@ -147,6 +160,10 @@ class LaMaModel:
             result_bgr: H x W x 3 BGR uint8
         """
         origin_height, origin_width = image_rgb.shape[:2]
+
+        # 防御:PNG 等带 alpha 的图会被读成 HxWx4,与 RGBA 输入处理保持一致
+        if image_rgb.ndim == 3 and image_rgb.shape[2] == 4:
+            image_rgb = _rgba_to_rgb(image_rgb)
 
         pad_image = pad_img_to_modulo(image_rgb, mod=self.pad_mod)
         pad_mask = pad_img_to_modulo(mask_gray, mod=self.pad_mod)
