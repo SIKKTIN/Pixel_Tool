@@ -15,6 +15,12 @@ import numpy as np
 import cv2
 from PIL import Image
 
+# 把 src/ 加入 sys.path,使 watermark_remover 子包可直接 import
+_PROJECT_ROOT = Path(__file__).resolve().parent
+_SRC_DIR = _PROJECT_ROOT / "src"
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
+
 from PySide6.QtCore import Qt, QThread, Signal, QSize
 from PySide6.QtGui import QAction, QImage, QPixmap, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
@@ -706,6 +712,23 @@ class MainWindow(QMainWindow):
         # ------- 第二个工具 -------
         self.scale_tab = ScaleWidget()
         self.tabs.addTab(self.scale_tab, "📐 尺寸缩放")
+
+        # ------- 第三个工具:去水印(自 Test 项目移植)-------
+        try:
+            from watermark_remover.widget import WatermarkWidget
+            self.watermark_tab = WatermarkWidget()
+            self.tabs.addTab(self.watermark_tab, "🪄 去水印")
+        except Exception as exc:  # noqa: BLE001
+            # 缺依赖时(如未装 torch)显示降级占位
+            placeholder_wm = QWidget()
+            ph_layout = QVBoxLayout(placeholder_wm)
+            ph_layout.setAlignment(Qt.AlignCenter)
+            ph_label = QLabel(f"⚠️ 去水印模块加载失败\n\n{exc}\n\n请检查 torch / opencv-python 是否已安装。")
+            ph_label.setAlignment(Qt.AlignCenter)
+            ph_label.setStyleSheet("color: #c33; font-size: 14px;")
+            ph_label.setWordWrap(True)
+            ph_layout.addWidget(ph_label)
+            self.tabs.addTab(placeholder_wm, "🪄 去水印")
 
         # ------- 预留 Tab: 后续添加工具的位置 -------
         placeholder = QWidget()

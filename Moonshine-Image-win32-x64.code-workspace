@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "../Moonshine-Image-v1.1.0-win-x64-cu126-bundled-models/Moonshine-Image-win32-x64"
+		},
+		{
+			"path": "../Test"
+		},
+		{
+			"path": "."
+		}
+	],
+	"settings": {}
+}

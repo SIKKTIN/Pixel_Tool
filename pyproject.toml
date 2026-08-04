@@ -3,19 +3,25 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "perfect-pixel"  
-version = "0.1.4"
-description = "A library for auto grid detection and pixel art refinement."
+name = "perfect-pixel"
+version = "0.1.5"
+description = "A local desktop tool for pixel-art refinement, image scaling, and watermark removal."
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [
     { name = "theAmusing", email = "amusingyyy@gmail.com" }
 ]
-keywords = ["pixel", "pixel-art", "pixel-style", "computer-vision", "opencv", "numpy", "image-processing"]
-
+keywords = [
+    "pixel", "pixel-art", "pixel-style",
+    "computer-vision", "opencv", "numpy", "image-processing",
+    "watermark-removal", "inpainting", "lama", "slbr",
+]
 dependencies = [
     "numpy>=1.20.0",
+    "opencv-python>=4.8.0",
+    "Pillow>=10.0.0",
+    "PySide6>=6.5.0",
 ]
 
 classifiers = [
@@ -26,19 +32,39 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-# pip install "perfect-pixel[opencv]"
-opencv = ["opencv-python"]
+# pip install "perfect-pixel[opencv]"  (默认已含 opencv-python,保留向后兼容)
+opencv = ["opencv-python>=4.8.0"]
+# pip install "perfect-pixel[inpaint]"  启用去水印 (SLBR + LaMa)
+inpaint = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "scipy>=1.11.0",
+    "loguru>=0.7.0",
+]
+# pip install "perfect-pixel[gpu]"      CUDA 12.x GPU 推理
+gpu = ["torch>=2.0.0", "torchvision>=0.15.0"]
+# pip install "perfect-pixel[all]"       一键安装所有可选
+all = [
+    "opencv-python>=4.8.0",
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "scipy>=1.11.0",
+    "loguru>=0.7.0",
+]
 
 [project.urls]
 "Homepage" = "https://github.com/theamusing/perfectPixel"
 "Web Demo" = "https://github.com/theamusing/perfectPixel_webdemo"
+
+[project.gui-scripts]
+perfect-pixel-tool = "desktop_app:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["perfect_pixel*"]
+include = ["perfect_pixel*", "watermark_remover*"]
 
 [tool.setuptools.package-data]
-# None
+"watermark_remover.slbr_runtime" = ["**/*.py"]
