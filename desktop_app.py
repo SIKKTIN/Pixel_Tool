@@ -9,19 +9,15 @@ from __future__ import annotations
 
 import os
 import sys
+import uuid
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import cv2
 from PIL import Image
 
-# 把 src/ 加入 sys.path,使 watermark_remover 子包可直接 import
-_PROJECT_ROOT = Path(__file__).resolve().parent
-_SRC_DIR = _PROJECT_ROOT / "src"
-if str(_SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(_SRC_DIR))
-
-from PySide6.QtCore import Qt, QThread, Signal, QSize
+from PySide6.QtCore import Qt, QThread, Signal, QSize, QObject
 from PySide6.QtGui import QAction, QImage, QPixmap, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -30,6 +26,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -44,7 +41,328 @@ from PySide6.QtWidgets import (
     QToolBar,
     QVBoxLayout,
     QWidget,
+    QSplitter,
 )
+
+
+# ============================================================
+# 图片暂存区（中央管理器）
+# ============================================================
+
+class ImageBuffer(QObject):
+    """全局图片暂存管理器，供所有 Tab 共享。
+
+    存储每个暂存项的：ID、numpy 数组、来源 Tab、创建时间、来源文件名。
+    右侧面板监听此对象的变化来更新缩略图。
+    """
+
+    changed = Signal()
+
+    def __init__(self, max_items: int = 20):
+        super().__init__()
+        self._items: list[dict] = []
+        self._max_items = max_items
+        self._active_id: Optional[str] = None
+
+    def push(self, image: np.ndarray, source_tab: str = "", source_file: str = "") -> str:
+        """把一张图片压入暂存区，返回新项 ID。"""
+        item_id = uuid.uuid4().hex[:8]
+        h, w = image.shape[:2]
+        self._items.append({
+            "id": item_id,
+            "image": image,
+            "source_tab": source_tab,
+            "source_file": source_file,
+            "size_text": f"{w} × {h}",
+            "created_at": len(self._items) + 1,
+        })
+        if len(self._items) > self._max_items:
+            self._items.pop(0)
+        self._active_id = item_id
+        self.changed.emit()
+        return item_id
+
+    def set_active(self, item_id: str) -> None:
+        """把指定项设为当前选中。"""
+        if any(it["id"] == item_id for it in self._items):
+            self._active_id = item_id
+            self.changed.emit()
+
+    def get_active(self) -> Optional[np.ndarray]:
+        """获取当前选中的图片数组，没有则返回 None。"""
+        for it in self._items:
+            if it["id"] == self._active_id:
+                return it["image"]
+        return None
+
+    def get_by_id(self, item_id: str) -> Optional[np.ndarray]:
+        for it in self._items:
+            if it["id"] == item_id:
+                return it["image"]
+        return None
+
+    def remove(self, item_id: str) -> None:
+        self._items = [it for it in self._items if it["id"] != item_id]
+        if self._active_id == item_id:
+            self._active_id = self._items[-1]["id"] if self._items else None
+        self.changed.emit()
+
+    def clear(self) -> None:
+        self._items.clear()
+        self._active_id = None
+        self.changed.emit()
+
+    def items(self) -> list[dict]:
+        return list(self._items)
+
+    @property
+    def active_id(self) -> Optional[str]:
+        return self._active_id
+
+
+# 全局唯一实例
+_image_buffer: Optional[ImageBuffer] = None
+
+
+def image_buffer() -> ImageBuffer:
+    global _image_buffer
+    if _image_buffer is None:
+        _image_buffer = ImageBuffer()
+    return _image_buffer
+
+
+# ============================================================
+# 右侧暂存区面板
+# ============================================================
+
+class ImageTrayWidget(QWidget):
+    """悬浮在主窗口右侧的图片暂存区。
+
+    行为:
+    - 显示缩略图列表，最新的在最上（栈式）
+    - 点击缩略图 → 设为当前选中（高亮边框）
+    - 双击缩略图 → 把图片送回当前 Tab 作为输入（发送 load_request 信号）
+    - 工具栏:清除全部 / 删除选中
+    - 空白时显示提示文字
+    """
+
+    load_request = Signal(str)   # item_id
+
+    THUMB_SIZE = 120
+    COLUMNS = 2
+
+    def __init__(self, buffer: ImageBuffer, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._buf = buffer
+        self._thumb_widgets: dict[str, QWidget] = {}
+
+        self.setFixedWidth(self.THUMB_SIZE * self.COLUMNS + 16)
+        self.setMinimumHeight(200)
+        self.setMaximumWidth(400)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(6)
+
+        # --- 标题栏 ---
+        header = QHBoxLayout()
+        lbl = QLabel("📦 暂存区")
+        lbl.setStyleSheet("font-weight: bold; font-size: 13px;")
+        header.addWidget(lbl)
+        header.addStretch(1)
+
+        self._count_label = QLabel("0")
+        self._count_label.setStyleSheet("color: #888; font-size: 12px;")
+        header.addWidget(self._count_label)
+
+        self.btn_clear = QPushButton("清空")
+        self.btn_clear.setFixedSize(40, 22)
+        self.btn_clear.clicked.connect(self._on_clear)
+        self.btn_clear.setStyleSheet("font-size: 11px; padding: 0;")
+        header.addWidget(self.btn_clear)
+        root.addLayout(header)
+
+        # --- 缩略图网格容器 ---
+        self._row_widget = QWidget()
+        self._grid = QVBoxLayout(self._row_widget)
+        self._grid.setSpacing(6)
+        self._grid.addStretch(1)
+        root.addWidget(_TrayScrollArea(self._row_widget, self))
+
+        # --- 底部:选中图信息 ---
+        self._info_label = QLabel("双击缩略图送入当前模块")
+        self._info_label.setStyleSheet("color: #666; font-size: 11px;")
+        self._info_label.setWordWrap(True)
+        root.addWidget(self._info_label)
+
+        buffer.changed.connect(self._refresh)
+
+    # ------------------------------------------------------------------
+    def _refresh(self) -> None:
+        """整体重建缩略图列表（项不多，重建开销可接受）。"""
+        # 先断开信号，避免重建过程中触发的 changed 信号导致递归
+        try:
+            self._buf.changed.disconnect(self._refresh)
+        except RuntimeError:
+            pass
+
+        # 清除所有已有 row widgets（保留最后的 stretch）
+        while self._grid.count() > 1:
+            child = self._grid.takeAt(0)
+            if child.widget() is not None:
+                child.widget().deleteLater()
+            elif child.layout() is not None:
+                child.layout().deleteLater()
+            del child
+
+        items = list(reversed(self._buf.items()))
+        self._count_label.setText(str(len(items)))
+        self._thumb_widgets.clear()
+
+        for row_start in range(0, len(items), self.COLUMNS):
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setSpacing(6)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            for item in items[row_start:row_start + self.COLUMNS]:
+                w = _ThumbItem(item, self._buf.active_id, self)
+                w.clicked.connect(self._on_thumb_click)
+                w.double_clicked.connect(self._on_thumb_dclick)
+                self._thumb_widgets[item["id"]] = w
+                row_layout.addWidget(w)
+            if len(items) - row_start < self.COLUMNS:
+                row_layout.addStretch(1)
+            # 插入到 stretch 之前
+            self._grid.insertWidget(self._grid.count() - 1, row_widget)
+
+        # 更新 info
+        active = self._buf.get_active()
+        if active is None:
+            self._info_label.setText("双击缩略图送入当前模块")
+            self._info_label.setStyleSheet("color: #666; font-size: 11px;")
+        else:
+            self._info_label.setText("当前选中，已高亮")
+            self._info_label.setStyleSheet("color: #4a9; font-size: 11px;")
+
+        self._buf.changed.connect(self._refresh)
+
+    def _on_thumb_click(self, item_id: str) -> None:
+        self._buf.set_active(item_id)
+
+    def _on_thumb_dclick(self, item_id: str) -> None:
+        self._buf.set_active(item_id)
+        self.load_request.emit(item_id)
+
+    def _on_clear(self) -> None:
+        self._buf.clear()
+
+
+class _TrayScrollArea(QWidget):
+    """带滚动条的缩略图网格容器。"""
+
+    def __init__(self, content_widget: QWidget, parent: QWidget | None = None):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QScrollArea
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setStyleSheet("border: none; background: transparent;")
+        scroll.setWidget(content_widget)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(scroll)
+
+
+class _ThumbItem(QWidget):
+    """单张缩略图卡片:点击选中，双击触发 load。"""
+
+    clicked = Signal(str)
+    double_clicked = Signal(str)
+
+    THUMB = ImageTrayWidget.THUMB_SIZE
+    PADDING = 4
+
+    def __init__(self, item: dict, active_id: str | None, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._item = item
+        self._item_id = item["id"]
+        self._is_active = item["id"] == active_id
+
+        self.setFixedSize(self.THUMB, self.THUMB + 28)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip(f"来源: {item['source_tab']}\n尺寸: {item['size_text']}")
+
+        self._lbl_img = QLabel(self)
+        self._lbl_img.setFixedSize(self.THUMB, self.THUMB)
+        self._lbl_img.setAlignment(Qt.AlignCenter)
+        self._lbl_img.setStyleSheet("background: #2a2a2a; border-radius: 4px;")
+        self._lbl_img.move(self.PADDING, self.PADDING)
+
+        self._lbl_size = QLabel(item["size_text"], self)
+        self._lbl_size.setAlignment(Qt.AlignCenter)
+        self._lbl_size.setStyleSheet("font-size: 10px; color: #888;")
+        self._lbl_size.setFixedWidth(self.THUMB)
+        self._lbl_size.move(self.PADDING, self.THUMB + self.PADDING + 2)
+
+        self._set_thumbnail(item["image"])
+        self._update_border()
+
+    def _set_thumbnail(self, arr: np.ndarray) -> None:
+        thumb_h = self.THUMB
+        h, w = arr.shape[:2]
+        scale = thumb_h / max(h, w)
+        tw, th = int(w * scale), int(h * scale)
+        img = Image.fromarray(arr)
+        img_small = img.resize((tw, th), Image.LANCZOS)
+        qimg = QImage(img_small.tobytes(), tw, th, 3 * tw, QImage.Format_RGB888).copy()
+        pix = QPixmap.fromImage(qimg)
+        self._lbl_img.setPixmap(pix)
+
+    def _update_border(self) -> None:
+        if self._is_active:
+            self.setStyleSheet(
+                f"border: 2px solid #4caf50; border-radius: 6px; "
+                f"background: #1e3a1e; margin: 2px;"
+            )
+        else:
+            self.setStyleSheet(
+                "border: 1px solid #444; border-radius: 6px; "
+                "background: #252525; margin: 2px;"
+            )
+
+    def enterEvent(self, event) -> None:
+        if not self._is_active:
+            self.setStyleSheet(
+                "border: 1px solid #666; border-radius: 6px; "
+                "background: #303030; margin: 2px;"
+            )
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._update_border()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self._is_active = True
+            self._update_border()
+            self.clicked.emit(self._item_id)
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self.double_clicked.emit(self._item_id)
+        super().mouseDoubleClickEvent(event)
+
+
+# 把 src/ 加入 sys.path，使 watermark_remover 子包和 perfect_pixel 可直接 import
+_PROJECT_ROOT = Path(__file__).resolve().parent
+_SRC_DIR = _PROJECT_ROOT / "src"
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
 
 from perfect_pixel import get_perfect_pixel
 
@@ -255,6 +573,7 @@ class PixelRefineWidget(QWidget):
         self.btn_run.setEnabled(True)
         self.btn_run.setText("生成像素图")
         self.btn_save.setEnabled(True)
+        image_buffer().push(out, source_tab="像素细化")
         self.status_message(
             f"网格 {w} × {h}  |  预览 {scale}×  "
             f"|  采样 {self.cmb_sample.currentText()}"
@@ -281,6 +600,18 @@ class PixelRefineWidget(QWidget):
             self.status_message(f"已保存到 {path}")
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "保存失败", str(exc))
+
+    def load_from_buffer(self, image: np.ndarray) -> None:
+        """从暂存区双击接收一张图片，作为新的输入原图。"""
+        self.input_image = image
+        self.view_input.set_image(image)
+        self.view_output.clear()
+        self.view_preview.clear()
+        self.output_image = None
+        self.btn_save.setEnabled(False)
+        self.last_saved_path = None
+        h, w = image.shape[:2]
+        self.status_message(f"已从暂存区加载 ({w} × {h})")
 
     # ------------------------------------------------------------------
     # 状态栏
@@ -680,6 +1011,24 @@ class ScaleWidget(QWidget):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "导出失败", str(exc))
 
+    def load_from_buffer(self, image: np.ndarray) -> None:
+        """从暂存区双击接收一张图片，作为新的输入原图。"""
+        self.input_image = image
+        h, w = self.input_image.shape[:2]
+        self.lbl_file.setText("(暂存区)")
+        self.view_input.set_image(image)
+        self.spn_w.blockSignals(True)
+        self.spn_h.blockSignals(True)
+        self.spn_w.setValue(w)
+        self.spn_h.setValue(h)
+        self.spn_w.blockSignals(False)
+        self.spn_h.blockSignals(False)
+        self.dsp_scale.setValue(1.0)
+        self._refresh_preview()
+        self.btn_save_png.setEnabled(True)
+        self.btn_save_jpg.setEnabled(True)
+        self.status_message(f"已从暂存区加载 ({w} × {h})")
+
     # ------------------------------------------------------------------
     # 状态栏
     # ------------------------------------------------------------------
@@ -701,6 +1050,12 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Perfect Pixel Tool")
         self.resize(1280, 800)
 
+        # ------- 中央:左侧 Tab 区域 + 右侧暂存区 -------
+        central = QWidget(self)
+        root = QHBoxLayout(central)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(4)
+
         self.tabs = QTabWidget()
         self.tabs.setTabPosition(QTabWidget.North)
         self.tabs.setMovable(False)
@@ -713,36 +1068,48 @@ class MainWindow(QMainWindow):
         self.scale_tab = ScaleWidget()
         self.tabs.addTab(self.scale_tab, "📐 尺寸缩放")
 
-        # ------- 第三个工具:去水印(自 Test 项目移植)-------
+        # ------- 第三个工具:去水印 -------
         try:
-            from watermark_remover.widget import WatermarkWidget
+            from watermark_remover.widget import WatermarkWidget, set_buffer_ref
             self.watermark_tab = WatermarkWidget()
             self.tabs.addTab(self.watermark_tab, "🪄 去水印")
+            # 把 buffer 注入 watermark_remover，以便它能 push 图片
+            set_buffer_ref(image_buffer())
         except Exception as exc:  # noqa: BLE001
-            # 缺依赖时(如未装 torch)显示降级占位
             placeholder_wm = QWidget()
             ph_layout = QVBoxLayout(placeholder_wm)
             ph_layout.setAlignment(Qt.AlignCenter)
-            ph_label = QLabel(f"⚠️ 去水印模块加载失败\n\n{exc}\n\n请检查 torch / opencv-python 是否已安装。")
+            ph_label = QLabel(
+                f"⚠️ 去水印模块加载失败\n\n{exc}\n\n请检查 torch / opencv-python 是否已安装。"
+            )
             ph_label.setAlignment(Qt.AlignCenter)
             ph_label.setStyleSheet("color: #c33; font-size: 14px;")
             ph_label.setWordWrap(True)
             ph_layout.addWidget(ph_label)
             self.tabs.addTab(placeholder_wm, "🪄 去水印")
 
-        # ------- 预留 Tab: 后续添加工具的位置 -------
+        # ------- 预留 Tab -------
         placeholder = QWidget()
         ph_layout = QVBoxLayout(placeholder)
         ph_layout.setAlignment(Qt.AlignCenter)
-        ph_label = QLabel("🚧 工具开发中…\n\n下一个工具(如批量处理 / 颜色量化 / 动画导出等)\n会在此添加。")
+        ph_label = QLabel(
+            "🚧 工具开发中…\n\n下一个工具会在此添加。"
+        )
         ph_label.setAlignment(Qt.AlignCenter)
         ph_label.setStyleSheet("color: #888; font-size: 16px;")
         ph_layout.addWidget(ph_label)
         self.tabs.addTab(placeholder, "➕ 即将到来")
 
-        self.setCentralWidget(self.tabs)
+        root.addWidget(self.tabs, 1)
 
-        # ------- 工具栏快捷键(按当前 Tab 分发) -------
+        # ------- 右侧暂存区 -------
+        self.tray = ImageTrayWidget(image_buffer())
+        self.tray.load_request.connect(self._on_tray_load_request)
+        root.addWidget(self.tray)
+
+        self.setCentralWidget(central)
+
+        # ------- 工具栏 -------
         toolbar = QToolBar("主工具栏")
         toolbar.setIconSize(QSize(16, 16))
         self.addToolBar(toolbar)
@@ -761,12 +1128,21 @@ class MainWindow(QMainWindow):
         self.setStatusBar(QStatusBar(self))
         self.statusBar().showMessage("就绪 — 拖拽图片到窗口,或点击「打开图片」")
 
-        # ------- Ctrl+W 关闭当前 Tab(disabled:有标签页模型)-------
         QShortcut(QKeySequence("Ctrl+Q"), self, self.close)
 
     def register_tab(self, widget: QWidget, title: str) -> None:
-        """未来新增工具时调用:self.register_tab(NewToolWidget(), '去水印')"""
         self.tabs.insertTab(self.tabs.count() - 1, widget, title)
+
+    # ------------------------------------------------------------------
+    # 暂存区双击 → 把图片送入当前 Tab
+    # ------------------------------------------------------------------
+    def _on_tray_load_request(self, item_id: str) -> None:
+        img = image_buffer().get_by_id(item_id)
+        if img is None:
+            return
+        w = self.tabs.currentWidget()
+        if w is not None and hasattr(w, "load_from_buffer"):
+            w.load_from_buffer(img)
 
     # ------------------------------------------------------------------
     # 工具栏快捷键:按当前 Tab 分发
@@ -783,7 +1159,6 @@ class MainWindow(QMainWindow):
         w = self._current_widget()
         if w is None:
             return
-        # 像素细化 Tab -> on_save;尺寸缩放 Tab -> 默认导出 PNG
         if hasattr(w, "on_save"):
             w.on_save()
         elif hasattr(w, "_on_save"):

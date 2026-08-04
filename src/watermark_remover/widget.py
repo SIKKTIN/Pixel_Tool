@@ -143,6 +143,17 @@ def _cuda_available() -> bool:
         return False
 
 
+def _push_to_buffer(image: np.ndarray, source_tab: str) -> None:
+    """把图片推入全局 ImageBuffer（通过 desktop_app.py 注入的引用）。"""
+    # 在 desktop_app.py 的 ImageBuffer 初始化后此引用被设置
+    if hasattr(_push_to_buffer, "_buffer"):
+        _push_to_buffer._buffer.push(image, source_tab=source_tab)
+
+
+def set_buffer_ref(buffer_obj) -> None:
+    _push_to_buffer._buffer = buffer_obj
+
+
 # ---------------------------------------------------------------------------
 # 蒙版绘制画布
 # ---------------------------------------------------------------------------
@@ -878,6 +889,8 @@ class WatermarkWidget(QWidget):
         self.btn_run.setEnabled(True)
         self.btn_run.setText("开始处理")
         self.btn_save.setEnabled(True)
+        # 推入暂存区
+        _push_to_buffer(clean_rgb, "去水印(SLBR)")
         self.status_message(
             f"SLBR 完成  |  输出 {clean_rgb.shape[1]} × {clean_rgb.shape[0]} px"
         )
@@ -888,6 +901,8 @@ class WatermarkWidget(QWidget):
         self.btn_run.setEnabled(True)
         self.btn_run.setText("开始处理")
         self.btn_save.setEnabled(True)
+        # 推入暂存区
+        _push_to_buffer(result_rgb, "去水印(LaMa)")
         self.status_message(
             f"LaMa 完成  |  输出 {result_rgb.shape[1]} × {result_rgb.shape[0]} px"
         )
@@ -928,6 +943,22 @@ class WatermarkWidget(QWidget):
         local = urls[0].toLocalFile()
         if local:
             self.load_path(local)
+
+    def load_from_buffer(self, image: np.ndarray) -> None:
+        """从暂存区双击接收一张图片，作为新的输入。"""
+        self.input_image = image
+        self.result_image = None
+        self.last_saved_path = None
+        self.btn_save.setEnabled(False)
+        self.btn_run.setEnabled(True)
+        self.mask_canvas.set_image(image)
+        self.mask_canvas.clear_mask()
+        self.result_panel.clear_all()
+        self.result_panel.set_original(image)
+        h, w = image.shape[:2]
+        is_lama = self.mode_buttons["lama"].isChecked()
+        self.btn_clear_mask.setEnabled(is_lama)
+        self.status_message(f"已从暂存区加载 ({w} × {h})")
 
     # ------------------------------------------------------------------
     # 状态栏
