@@ -161,7 +161,7 @@ class ImageTrayWidget(QWidget):
         self.setMaximumWidth(400)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(6, 6, 6, 6)
+        root.setContentsMargins(2, 4, 2, 4)
         root.setSpacing(6)
 
         # --- 标题栏 ---
@@ -220,18 +220,24 @@ class ImageTrayWidget(QWidget):
         self._thumb_widgets.clear()
 
         for row_start in range(0, len(items), self.COLUMNS):
+            row_items = items[row_start:row_start + self.COLUMNS]
             row_widget = QWidget()
             row_layout = QHBoxLayout(row_widget)
             row_layout.setSpacing(6)
-            row_layout.setContentsMargins(0, 0, 0, 0)
-            for item in items[row_start:row_start + self.COLUMNS]:
+            row_layout.setContentsMargins(0, 0, 10, 0)
+            for item in row_items:
                 w = _ThumbItem(item, self._buf.active_id, self)
                 w.clicked.connect(self._on_thumb_click)
                 w.double_clicked.connect(self._on_thumb_dclick)
                 self._thumb_widgets[item["id"]] = w
                 row_layout.addWidget(w)
-            if len(items) - row_start < self.COLUMNS:
-                row_layout.addStretch(1)
+            # 不足一列时用空白 widget 填充，勿用 stretch（会撑大整行）
+            if len(row_items) < self.COLUMNS:
+                spacer = QWidget()
+                row_layout.addWidget(spacer)
+            row_widget.setFixedWidth(
+                self.THUMB_SIZE * self.COLUMNS + (self.COLUMNS - 1) * 6
+            )
             # 插入到 stretch 之前
             self._grid.insertWidget(self._grid.count() - 1, row_widget)
 
@@ -268,6 +274,7 @@ class _TrayScrollArea(QWidget):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll.setStyleSheet("border: none; background: transparent;")
+        scroll.viewport().setStyleSheet("border: none; margin: 0; padding: 0;")
         scroll.setWidget(content_widget)
 
         lay = QVBoxLayout(self)
@@ -291,21 +298,22 @@ class _ThumbItem(QWidget):
         self._is_active = item["id"] == active_id
 
         self.setFixedSize(self.THUMB, self.THUMB + 28)
+        self.setMinimumSize(self.THUMB, self.THUMB + 28)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.PointingHandCursor)
         self.setToolTip(f"来源: {item['source_tab']}\n尺寸: {item['size_text']}")
 
         self._lbl_img = QLabel(self)
-        self._lbl_img.setFixedSize(self.THUMB, self.THUMB)
+        self._lbl_img.setFixedSize(self.THUMB - 2, self.THUMB - 2)
         self._lbl_img.setAlignment(Qt.AlignCenter)
-        self._lbl_img.setStyleSheet("background: #2a2a2a; border-radius: 4px;")
-        self._lbl_img.move(self.PADDING, self.PADDING)
+        self._lbl_img.setStyleSheet("background: #2a2a2a;")
+        self._lbl_img.move(1, 1)
 
         self._lbl_size = QLabel(item["size_text"], self)
         self._lbl_size.setAlignment(Qt.AlignCenter)
-        self._lbl_size.setStyleSheet("font-size: 10px; color: #888;")
-        self._lbl_size.setFixedWidth(self.THUMB)
-        self._lbl_size.move(self.PADDING, self.THUMB + self.PADDING + 2)
+        self._lbl_size.setStyleSheet("font-size: 10px; color: #888; background: transparent; border: none;")
+        self._lbl_size.setFixedWidth(self.THUMB - 2)
+        self._lbl_size.move(1, self.THUMB)
 
         self._set_thumbnail(item["image"])
         self._update_border()
@@ -324,20 +332,20 @@ class _ThumbItem(QWidget):
     def _update_border(self) -> None:
         if self._is_active:
             self.setStyleSheet(
-                f"border: 2px solid #4caf50; border-radius: 6px; "
-                f"background: #1e3a1e; margin: 2px;"
+                "border: 2px solid #4caf50; border-radius: 6px; "
+                "background: #1e3a1e;"
             )
         else:
             self.setStyleSheet(
                 "border: 1px solid #444; border-radius: 6px; "
-                "background: #252525; margin: 2px;"
+                "background: #252525;"
             )
 
     def enterEvent(self, event) -> None:
         if not self._is_active:
             self.setStyleSheet(
                 "border: 1px solid #666; border-radius: 6px; "
-                "background: #303030; margin: 2px;"
+                "background: #303030;"
             )
         super().enterEvent(event)
 
@@ -756,6 +764,12 @@ SCALE_ALGORITHMS: dict[str, int] = {
 class ScaleWidget(QWidget):
     """尺寸缩放工具:打开原图,通过算法 + 目标尺寸实时缩放,支持导出。"""
 
+    _buf: "ImageBuffer | None" = None
+
+    @staticmethod
+    def set_buffer_ref(buf: "ImageBuffer | None") -> None:
+        ScaleWidget._buf = buf
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
 
@@ -963,6 +977,11 @@ class ScaleWidget(QWidget):
     def _apply_scale_to_size(self) -> None:
         # 显式「应用倍率」按钮:用当前 dsp_scale 重算一次
         self._on_scale_changed(self.dsp_scale.value())
+        if self._buf is not None and self.input_image is not None:
+            out = self._current_output()
+            if out is not None:
+                self._buf.push(out, source_tab="尺寸缩放")
+        self._on_scale_changed(self.dsp_scale.value())
 
     # ------------------------------------------------------------------
     # 渲染与导出
@@ -1067,6 +1086,7 @@ class MainWindow(QMainWindow):
         # ------- 第二个工具 -------
         self.scale_tab = ScaleWidget()
         self.tabs.addTab(self.scale_tab, "📐 尺寸缩放")
+        ScaleWidget.set_buffer_ref(image_buffer())
 
         # ------- 第三个工具:去水印 -------
         try:
