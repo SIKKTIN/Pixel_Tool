@@ -44,6 +44,10 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QSplitter,
+    QButtonGroup,
+    QLayout,
+    QAbstractButton,
+    QStackedLayout,
 )
 
 
@@ -436,6 +440,12 @@ if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
 from perfect_pixel import get_perfect_pixel
+from perfect_pixel.background_remover import (
+    remove_background_color,
+    remove_background_channel,
+    remove_background_ai,
+    remove_background,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1137,11 +1147,90 @@ class ScaleWidget(QWidget):
 
 
 # ---------------------------------------------------------------------------
-# 主窗口
+# 背景去除工具页（新）
 # ---------------------------------------------------------------------------
 
+class BGRWorker(QThread):
+    """后台背景处理线程，避免大图时 UI 卡死。"""
+    finished = Signal(object)   # np.ndarray | None
+    failed = Signal(str)
+
+    def __init__(
+        self, mode: str,
+        input_rgb: np.ndarray,
+        bg_color_preview, bg_color_picked,
+        bg_color,
+        c_tolerance, c_contiguous, c_feather,
+        c_anti_alias, c_chroma_key, c_edge_shrink,
+        ch_channel, ch_min, ch_max, ch_invert,
+        ch_feather, ch_edge_shrink,
+    ) -> None:
+        super().__init__()
+        self.mode = mode
+        self.input_rgb = input_rgb
+        self.bg_color_preview = bg_color_preview
+        self.bg_color_picked = bg_color_picked
+        self.bg_color = bg_color
+        self.c_tolerance = c_tolerance
+        self.c_contiguous = c_contiguous
+        self.c_feather = c_feather
+        self.c_anti_alias = c_anti_alias
+        self.c_chroma_key = c_chroma_key
+        self.c_edge_shrink = c_edge_shrink
+        self.ch_channel = ch_channel
+        self.ch_min = ch_min
+        self.ch_max = ch_max
+        self.ch_invert = ch_invert
+        self.ch_feather = ch_feather
+        self.ch_edge_shrink = ch_edge_shrink
+
+    def run(self) -> None:
+        try:
+            result = self._compute()
+            self.finished.emit(result)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+
+    def _compute(self) -> "np.ndarray | None":
+        img = self.input_rgb
+        if self.mode == "color":
+            bg: Optional[Tuple[int, int, int]] = None
+            if self.bg_color_picked and self.bg_color_preview is not None:
+                r = int(self.bg_color_preview[2])
+                g = int(self.bg_color_preview[1])
+                b = int(self.bg_color_preview[0])
+                bg = (b, g, r)
+            elif self.bg_color is not None:
+                r = int(self.bg_color[2])
+                g = int(self.bg_color[1])
+                b = int(self.bg_color[0])
+                bg = (b, g, r)
+
+            return remove_background_color(
+                img,
+                tolerance=float(self.c_tolerance),
+                contiguous_only=self.c_contiguous,
+                target_color=bg,
+                feather=float(self.c_feather),
+                anti_alias=self.c_anti_alias,
+                chroma_key=self.c_chroma_key,
+                edge_shrink=float(self.c_edge_shrink),
+            )
+        elif self.mode == "channel":
+            return remove_background_channel(
+                img,
+                channel=self.ch_channel,
+                min_threshold=float(self.ch_min),
+                max_threshold=float(self.ch_max),
+                invert=self.ch_invert,
+                feather=float(self.ch_feather),
+                edge_shrink=float(self.ch_edge_shrink),
+            )
+        return None
+
+
 class BackgroundRemoverWidget(QWidget):
-    """背景透明度去除工具: 自动采样四角背景色，计算 alpha 遮罩并输出。"""
+    """背景去除工具: 三种模式（颜色 / 通道 / AI），支持洪水填充、Chroma Key、边缘收缩、羽化等。"""
 
     _buf: "ImageBuffer | None" = None
 
@@ -1152,10 +1241,18 @@ class BackgroundRemoverWidget(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
 
-        self.input_image: np.ndarray | None = None  # 原始 RGBA uint8 (显示用)
-        self.input_rgb: np.ndarray | None = None   # RGB uint8 (去背景计算用)
-        self.bg_color: np.ndarray | None = None      # BGR uint8
+        self.input_image: np.ndarray | None = None   # 原始 RGBA uint8
+        self.input_rgb: np.ndarray | None = None      # RGB 用于计算
+        self.bg_color: np.ndarray | None = None       # BGR uint8 检测出的背景色
+        self.output_rgba: np.ndarray | None = None  # 处理结果 RGBA
         self.last_saved_path: str | None = None
+        self._histogram_data: np.ndarray | None = None  # 通道直方图缓存
+        self._pending_refresh = False  # 参数已改，等待用户点按钮
+        self._dirty_since_load = False  # 加载后是否改过参数
+        self._worker: "BGRWorker | None" = None  # 后台处理线程
+
+        # ---- 拖拽 ----
+        self.setAcceptDrops(True)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
@@ -1173,43 +1270,146 @@ class BackgroundRemoverWidget(QWidget):
         self.lbl_file.setStyleSheet("color: #666;")
         ctrl_row.addWidget(self.lbl_file, 1)
 
-        self.btn_detect = QPushButton("重新采样背景色")
-        self.btn_detect.clicked.connect(self._detect_bg)
-        self.btn_detect.setEnabled(False)
-        ctrl_row.addWidget(self.btn_detect)
-
         ctrl_row.addStretch(1)
         root.addLayout(ctrl_row)
 
-        # ---- 左右分栏:参数 + 预览 -----------------------------------------
+        # ---- 模式切换标签 ------------------------------------------------
+        mode_bar = QHBoxLayout()
+        mode_bar.setSpacing(6)
+        mode_bar.addWidget(QLabel("模式:"))
+
+        self._mode_group = QButtonGroup()
+        self._mode_buttons: dict[str, QPushButton] = {}
+        for label, val in [("按颜色", "color"), ("按通道", "channel"), ("AI 智能", "ai")]:
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setFixedWidth(80)
+            btn.setCursor(Qt.PointingHandCursor)
+            self._mode_group.addButton(btn)
+            self._mode_buttons[val] = btn
+            mode_bar.addWidget(btn)
+        mode_bar.addStretch(1)
+        root.addLayout(mode_bar)
+        self._mode_group.buttonClicked.connect(self._on_mode_changed)
+        # 默认选中"按颜色"
+        self._mode_buttons["color"].setChecked(True)
+
+        # ---- 操作区 --------------------------------------------------
+        action_row = QHBoxLayout()
+        action_row.setSpacing(8)
+
+        self.btn_clear_panel = QPushButton("清除")
+        self.btn_clear_panel.clicked.connect(self._on_clear_panel)
+        self.btn_clear_panel.setEnabled(False)
+        action_row.addWidget(self.btn_clear_panel)
+
+        self.btn_export_png = QPushButton("导出 PNG")
+        self.btn_export_png.clicked.connect(self._export_png)
+        self.btn_export_png.setEnabled(False)
+        action_row.addWidget(self.btn_export_png)
+
+        self.btn_export_rgb = QPushButton("导出 RGB")
+        self.btn_export_rgb.clicked.connect(self._export_rgb)
+        self.btn_export_rgb.setEnabled(False)
+        action_row.addWidget(self.btn_export_rgb)
+
+        self.btn_add_to_tray = QPushButton("加入暂存区")
+        self.btn_add_to_tray.clicked.connect(self._push_to_buffer)
+        self.btn_add_to_tray.setEnabled(False)
+        action_row.addWidget(self.btn_add_to_tray)
+
+        action_row.addStretch(1)
+
+        self.btn_detect = QPushButton("重新采样背景色")
+        self.btn_detect.clicked.connect(self._detect_bg)
+        self.btn_detect.setEnabled(False)
+        action_row.addWidget(self.btn_detect)
+
+        self.btn_process = QPushButton("启动处理")
+        self.btn_process.clicked.connect(self._do_process)
+        self.btn_process.setEnabled(False)
+        self.btn_process.setStyleSheet(
+            "QPushButton { font-weight: bold; }"
+        )
+        action_row.addWidget(self.btn_process)
+
+        root.addLayout(action_row)
+
+        # ---- 左右分栏 ----------------------------------------------------
         body = QHBoxLayout()
         body.setSpacing(10)
 
-        # 左:参数面板
-        param_box = QGroupBox("去背景参数")
-        form = QFormLayout(param_box)
-        form.setContentsMargins(10, 14, 10, 10)
-        form.setSpacing(8)
+        # --- 左:参数面板 ---
+        self._param_box = QGroupBox("按颜色 — 处理参数")
+        self._param_stack = QStackedLayout(self._param_box)
+        self._param_stack.setContentsMargins(0, 0, 0, 0)
+        body.addWidget(self._param_box, 0)
 
-        self.spn_tolerance = QSpinBox()
-        self.spn_tolerance.setRange(1, 255)
-        self.spn_tolerance.setValue(30)
-        self.spn_tolerance.setFixedWidth(100)
-        self.spn_tolerance.valueChanged.connect(self._refresh_preview)
-        form.addRow("容差:", self.spn_tolerance)
+        # 创建三个模式页面
+        self._page_color = QWidget()
+        self._page_channel = QWidget()
+        self._page_ai = QWidget()
+        self._param_stack.addWidget(self._page_color)
+        self._param_stack.addWidget(self._page_channel)
+        self._param_stack.addWidget(self._page_ai)
 
-        self.spn_feather = QSpinBox()
-        self.spn_feather.setRange(0, 20)
-        self.spn_feather.setValue(2)
-        self.spn_feather.setFixedWidth(100)
-        self.spn_feather.valueChanged.connect(self._refresh_preview)
-        form.addRow("边缘羽化:", self.spn_feather)
+        # --- 右:预览 ---
+        preview_wrap = QVBoxLayout()
+        preview_wrap.setSpacing(10)
+        self.view_input = ImageView("原图")
+        self.view_output = ImageView("处理结果预览")
+        preview_wrap.addWidget(self.view_input, 1)
+        preview_wrap.addWidget(self.view_output, 1)
+        pw = QWidget()
+        pw.setLayout(preview_wrap)
+        body.addWidget(pw, 1)
+        root.addLayout(body, 1)
 
-        # 背景色选择
+        # ---- 构建各模式参数控件 ----
+        self._build_color_controls()
+        self._build_channel_controls()
+        self._build_ai_controls()
+
+    # ------------------------------------------------------------------
+    # 控件构建 — 按颜色
+    # ------------------------------------------------------------------
+    def _build_color_controls(self) -> None:
+        self._c_tolerance = QSpinBox()
+        self._c_tolerance.setRange(1, 100)
+        self._c_tolerance.setValue(10)
+        self._c_tolerance.setFixedWidth(100)
+        self._c_tolerance.valueChanged.connect(self._mark_dirty)
+
+        self._c_feather = QSpinBox()
+        self._c_feather.setRange(0, 20)
+        self._c_feather.setValue(0)
+        self._c_feather.setFixedWidth(100)
+        self._c_feather.valueChanged.connect(self._mark_dirty)
+
+        self._c_edge_shrink = QSpinBox()
+        self._c_edge_shrink.setRange(0, 20)
+        self._c_edge_shrink.setValue(0)
+        self._c_edge_shrink.setFixedWidth(100)
+        self._c_edge_shrink.valueChanged.connect(self._mark_dirty)
+
+        self._c_anti_alias = QCheckBox("边缘抗锯齿")
+        self._c_anti_alias.setChecked(True)
+        self._c_anti_alias.toggled.connect(self._mark_dirty)
+
+        self._c_chroma_key = QCheckBox("Chroma Key 净化（绿幕/蓝幕）")
+        self._c_chroma_key.setChecked(True)
+        self._c_chroma_key.toggled.connect(self._mark_dirty)
+
+        self._c_contiguous = QCheckBox("仅处理连续像素（四角洪水）")
+        self._c_contiguous.setChecked(True)
+        self._c_contiguous.toggled.connect(self._mark_dirty)
+
         self._bg_color_label = QLabel()
         self._bg_color_label.setFixedSize(60, 24)
         self._bg_color_label.setStyleSheet("background: #ffffff; border: 1px solid #888;")
         self._bg_color_preview = np.array([255, 255, 255], dtype=np.uint8)
+        self._bg_color_picked = False
+
         self._bg_color_btn = QPushButton("拾取背景色")
         self._bg_color_btn.setFixedWidth(120)
         self._bg_color_btn.clicked.connect(self._pick_bg_color)
@@ -1217,49 +1417,134 @@ class BackgroundRemoverWidget(QWidget):
         hl.addWidget(self._bg_color_label)
         hl.addWidget(self._bg_color_btn)
         hl.addStretch(1)
-        form.addRow("替换背景:", hl)
 
-        # 背景色预设
         presets_hl = QHBoxLayout()
-        for color, hex_val in [("白", "#ffffff"), ("黑", "#000000"), ("checker", None)]:
-            btn = QPushButton(color)
+        for label, hex_val in [("白", "#ffffff"), ("黑", "#000000")]:
+            btn = QPushButton(label)
             btn.setFixedWidth(50)
             btn.clicked.connect(
-                lambda checked, h=hex_val: self._set_bg_color_preset(h)
+                lambda checked, h=hex_val: self._set_bg_preset(h)
             )
             presets_hl.addWidget(btn)
-        form.addRow("", presets_hl)
 
-        self.btn_export_png = QPushButton("导出 PNG (含透明)")
-        self.btn_export_png.clicked.connect(self._export_png)
-        self.btn_export_png.setEnabled(False)
-        form.addRow("", self.btn_export_png)
+        lay = QFormLayout(self._page_color)
+        lay.setContentsMargins(10, 14, 10, 10)
+        lay.setSpacing(8)
+        lay.addRow("颜色容差 (%)", self._c_tolerance)
+        lay.addRow("边缘羽化 (px)", self._c_feather)
+        lay.addRow("边缘收缩 (px)", self._c_edge_shrink)
+        lay.addRow("边缘抗锯齿", self._c_anti_alias)
+        lay.addRow("Chroma Key 净化", self._c_chroma_key)
+        lay.addRow("仅处理连续像素", self._c_contiguous)
+        lay.addRow("背景色", hl)
+        lay.addRow("预设", presets_hl)
 
-        self.btn_export_rgb = QPushButton("导出 RGB (替换背景)")
-        self.btn_export_rgb.clicked.connect(self._export_rgb)
-        self.btn_export_rgb.setEnabled(False)
-        form.addRow("", self.btn_export_rgb)
+    # ------------------------------------------------------------------
+    # 控件构建 — 按通道
+    # ------------------------------------------------------------------
+    def _build_channel_controls(self) -> None:
+        self._ch_channel = QComboBox()
+        self._ch_channel.addItems([
+            "亮度 (Luminance)", "饱和度 (Saturation)",
+            "红色 (Red)", "绿色 (Green)", "蓝色 (Blue)"
+        ])
+        self._ch_channel.setFixedWidth(180)
+        self._ch_channel.currentIndexChanged.connect(self._on_channel_changed)
 
-        self.btn_add_to_tray = QPushButton("加入暂存区")
-        self.btn_add_to_tray.clicked.connect(self._push_to_buffer)
-        self.btn_add_to_tray.setEnabled(False)
-        form.addRow("", self.btn_add_to_tray)
+        self._ch_min = QSpinBox()
+        self._ch_min.setRange(0, 255)
+        self._ch_min.setValue(0)
+        self._ch_min.setFixedWidth(80)
+        self._ch_min.valueChanged.connect(self._mark_dirty)
 
-        body.addWidget(param_box, 0)
+        self._ch_max = QSpinBox()
+        self._ch_max.setRange(0, 255)
+        self._ch_max.setValue(255)
+        self._ch_max.setFixedWidth(80)
+        self._ch_max.valueChanged.connect(self._mark_dirty)
 
-        # 右:双图预览
-        preview_wrap = QVBoxLayout()
-        preview_wrap.setSpacing(10)
-        self.view_input = ImageView("原图")
-        self.view_output = ImageView("透明预览 (棋盘格)")
-        preview_wrap.addWidget(self.view_input, 1)
-        preview_wrap.addWidget(self.view_output, 1)
-        preview_wrap_w = QWidget()
-        preview_wrap_w.setLayout(preview_wrap)
-        body.addWidget(preview_wrap_w, 1)
-        root.addLayout(body, 1)
+        self._ch_invert = QCheckBox("反转遮罩")
+        self._ch_invert.toggled.connect(self._mark_dirty)
 
-        self.setAcceptDrops(True)
+        self._ch_feather = QSpinBox()
+        self._ch_feather.setRange(0, 20)
+        self._ch_feather.setValue(0)
+        self._ch_feather.setFixedWidth(100)
+        self._ch_feather.valueChanged.connect(self._mark_dirty)
+
+        self._ch_edge_shrink = QSpinBox()
+        self._ch_edge_shrink.setRange(0, 20)
+        self._ch_edge_shrink.setValue(0)
+        self._ch_edge_shrink.setFixedWidth(100)
+        self._ch_edge_shrink.valueChanged.connect(self._mark_dirty)
+
+        self._hist_canvas = QLabel()
+        self._hist_canvas.setFixedHeight(120)
+        self._hist_canvas.setMinimumWidth(300)
+        self._hist_canvas.setStyleSheet("background: #18181b; border: 1px solid #444;")
+        self._hist_canvas.setAlignment(Qt.AlignCenter)
+        self._hist_canvas.setText("加载图片后显示直方图")
+        self._hist_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        thr_hl = QHBoxLayout()
+        thr_hl.addWidget(QLabel("最小:"))
+        thr_hl.addWidget(self._ch_min)
+        thr_hl.addSpacing(10)
+        thr_hl.addWidget(QLabel("最大:"))
+        thr_hl.addWidget(self._ch_max)
+        thr_hl.addStretch(1)
+
+        lay = QFormLayout(self._page_channel)
+        lay.setContentsMargins(10, 14, 10, 10)
+        lay.setSpacing(8)
+        lay.addRow("通道来源", self._ch_channel)
+        lay.addRow("阈值范围", thr_hl)
+        lay.addRow("反转遮罩", self._ch_invert)
+        lay.addRow("边缘羽化 (px)", self._ch_feather)
+        lay.addRow("边缘收缩 (px)", self._ch_edge_shrink)
+        lay.addRow("通道直方图", self._hist_canvas)
+
+    # ------------------------------------------------------------------
+    # 控件构建 — AI
+    # ------------------------------------------------------------------
+    def _build_ai_controls(self) -> None:
+        self._ai_model = QComboBox()
+        self._ai_model.addItems(["标准 (isnet)", "高性能 (isnet_fp16)", "轻量 (isnet_quint8)"])
+        self._ai_model.setFixedWidth(180)
+
+        self._ai_edge_shrink = QSpinBox()
+        self._ai_edge_shrink.setRange(0, 20)
+        self._ai_edge_shrink.setValue(0)
+        self._ai_edge_shrink.setFixedWidth(100)
+
+        self._ai_status = QLabel("AI 模式需要下载 ONNX 模型文件（约 40MB）")
+        self._ai_status.setStyleSheet("color: #888; font-size: 12px;")
+
+        lay = QFormLayout(self._page_ai)
+        lay.setContentsMargins(10, 14, 10, 10)
+        lay.setSpacing(8)
+        lay.addRow("模型", self._ai_model)
+        lay.addRow("边缘收缩 (px)", self._ai_edge_shrink)
+        lay.addRow("说明", self._ai_status)
+
+    # ------------------------------------------------------------------
+    # 模式切换
+    # ------------------------------------------------------------------
+    def _on_mode_changed(self, btn: QAbstractButton) -> None:
+        for mode_val, b in self._mode_buttons.items():
+            if b is btn:
+                self._show_mode_controls(mode_val)
+                return
+
+    def _show_mode_controls(self, mode: str) -> None:
+        index_map = {"color": 0, "channel": 1, "ai": 2}
+        self._param_stack.setCurrentIndex(index_map.get(mode, 0))
+        title_map = {
+            "color": "按颜色 — 处理参数",
+            "channel": "按通道 — 处理参数",
+            "ai": "AI 智能 — 处理参数",
+        }
+        self._param_box.setTitle(title_map.get(mode, "参数"))
 
     # ------------------------------------------------------------------
     # 拖拽
@@ -1277,11 +1562,12 @@ class BackgroundRemoverWidget(QWidget):
             self._load_path(local)
 
     # ------------------------------------------------------------------
-    # 内部逻辑
+    # 打开 / 加载
     # ------------------------------------------------------------------
     def _on_open(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "打开图片", "", "图片文件 (*.png *.jpg *.jpeg *.bmp *.webp)"
+            self, "打开图片", "",
+            "图片文件 (*.png *.jpg *.jpeg *.bmp *.webp)"
         )
         if path:
             self._load_path(path)
@@ -1289,33 +1575,38 @@ class BackgroundRemoverWidget(QWidget):
     def _load_path(self, path: str) -> None:
         try:
             img = Image.open(path).convert("RGBA")
-            self.input_image = np.array(img, dtype=np.uint8)  # 保留原始 RGBA
-            self.input_rgb = self.input_image[..., :3]        # RGB 用于去背景计算
+            self.input_image = np.array(img, dtype=np.uint8)
+            self.input_rgb = self.input_image[..., :3]
+            h, w = self.input_rgb.shape[:2]
             name = os.path.basename(path)
             self.lbl_file.setText(name)
             self._detect_bg()
             self.btn_detect.setEnabled(True)
+            self.btn_clear_panel.setEnabled(True)
             self.btn_export_png.setEnabled(True)
             self.btn_export_rgb.setEnabled(True)
             self.btn_add_to_tray.setEnabled(True)
             self.view_input.set_image(self.input_image)
-            self._refresh_preview()
-        except Exception as exc:  # noqa: BLE001
+            self.btn_process.setEnabled(True)
+            self.status_message(f"已加载 {name} ({w} × {h})，点击「启动处理」开始去背景")
+        except Exception as exc:
             QMessageBox.warning(self, "加载失败", str(exc))
 
     def _detect_bg(self) -> None:
-        """自动采样四角中心区域的平均颜色作为背景色。"""
+        """自动采样四角 + 中心区域的平均颜色作为背景色。"""
         if self.input_rgb is None:
             return
         h, w = self.input_rgb.shape[:2]
-        margin = 8
-        patches = np.array([
-            self.input_rgb[margin:margin + 20, margin:margin + 20].reshape(-1, 3),
-            self.input_rgb[margin:margin + 20, w - margin - 20:w - margin].reshape(-1, 3),
-            self.input_rgb[h - margin - 20:h - margin, margin:margin + 20].reshape(-1, 3),
-            self.input_rgb[h - margin - 20:h - margin, w - margin - 20:w - margin].reshape(-1, 3),
-        ])
-        self.bg_color = patches.mean(axis=(0, 1)).astype(np.uint8)
+        m = 8
+        ps = 20
+        corners = [
+            self.input_rgb[m:m + ps, m:m + ps],
+            self.input_rgb[m:m + ps, w - m - ps:w - m],
+            self.input_rgb[h - m - ps:h - m, m:m + ps],
+            self.input_rgb[h - m - ps:h - m, w - m - ps:w - m],
+        ]
+        all_pixels = np.concatenate([p.reshape(-1, 3) for p in corners], axis=0)
+        self.bg_color = all_pixels.mean(axis=0).astype(np.uint8)
         self._update_bg_color_ui()
 
     def _update_bg_color_ui(self) -> None:
@@ -1323,143 +1614,329 @@ class BackgroundRemoverWidget(QWidget):
             return
         b, g, r = self.bg_color
         self._bg_color_preview = np.array([b, g, r], dtype=np.uint8)
-        self._bg_color_label.setStyleSheet(f"background: rgb({r},{g},{b}); border: 1px solid #888;")
+        self._bg_color_label.setStyleSheet(
+            f"background: rgb({r},{g},{b}); border: 1px solid #888;"
+        )
 
-    def _set_bg_color_preset(self, hex_val: str | None) -> None:
+    def _set_bg_preset(self, hex_val: str | None) -> None:
         if hex_val is None:
-            self._bg_color_preview = None  # checkerboard
-            self._bg_color_label.setStyleSheet("background: repeating-conic-gradient(#fff 0% 25%, #ddd 0% 50%) 50 / 16px 16px; border: 1px solid #888;")
-            self._refresh_preview()
-            return
-        r = int(hex_val[1:3], 16)
-        g = int(hex_val[3:5], 16)
-        b = int(hex_val[5:7], 16)
-        self._bg_color_preview = np.array([b, g, r], dtype=np.uint8)
-        self._bg_color_label.setStyleSheet(f"background: {hex_val}; border: 1px solid #888;")
-        self._refresh_preview()
+            self._bg_color_preview = None
+            self._bg_color_label.setStyleSheet(
+                "background: repeating-conic-gradient(#fff 0% 25%, #ddd 0% 50%) 50 / 16px 16px; border: 1px solid #888;"
+            )
+        else:
+            r = int(hex_val[1:3], 16)
+            g = int(hex_val[3:5], 16)
+            b = int(hex_val[5:7], 16)
+            self._bg_color_preview = np.array([b, g, r], dtype=np.uint8)
+            self._bg_color_label.setStyleSheet(
+                f"background: {hex_val}; border: 1px solid #888;"
+            )
+        self._bg_color_picked = False
+        self._mark_dirty()
 
     def _pick_bg_color(self) -> None:
-        """在原图上点一下，用该点颜色作为背景色。"""
+        """弹出颜色对话框手动指定背景色。"""
         if self.input_image is None:
             return
-        msg = QMessageBox(self)
-        msg.setWindowTitle("拾取背景色")
-        msg.setText("点击「OK」后，请在原图上点击一个背景色位置。")
-        msg.setStandardButtons(QMessageBox.Ok)
-        msg.exec()
-
-        # 用事件过滤捕获点击（简化：直接在预览图上模拟）
-        # 这里直接弹出颜色对话框
         color = QColorDialog.getColor(parent=self)
         if color.isValid():
-            self._bg_color_preview = np.array([color.blue(), color.green(), color.red()], dtype=np.uint8)
+            self._bg_color_preview = np.array(
+                [color.blue(), color.green(), color.red()], dtype=np.uint8
+            )
             self.bg_color = self._bg_color_preview.copy()
+            self._bg_color_picked = True
             self._update_bg_color_ui()
-            self._refresh_preview()
+            self._mark_dirty()
 
-    def _compute_alpha(self, img: np.ndarray, bg: np.ndarray) -> np.ndarray:
-        """计算 alpha 遮罩: 0=背景, 255=前景，中间值做羽化。"""
-        diff = np.sqrt(np.sum((img.astype(float) - bg) ** 2, axis=2))
-        tol = self.spn_tolerance.value()
-        feather = self.spn_feather.value()
-
-        if feather == 0:
-            alpha = np.where(diff > tol, 255, 0).astype(np.uint8)
-        else:
-            alpha = np.clip((diff - tol + feather) / (2 * feather) * 255, 0, 255)
-            alpha = np.where(diff <= tol - feather, 0, alpha)
-            alpha = np.where(diff >= tol + feather, 255, alpha)
-            alpha = alpha.astype(np.uint8)
-
-        return alpha
-
-    def _apply_bg_removal(self, img: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """返回 (RGBA图片, alpha通道)。"""
-        if self.bg_color is None:
-            self._detect_bg()
-        bg = self.bg_color if self.bg_color is not None else np.array([255, 255, 255], dtype=np.uint8)
-        alpha = self._compute_alpha(img, bg)
-        rgba = np.dstack([img, alpha])
-        return rgba, alpha
-
-    def _refresh_preview(self) -> None:
+    # ------------------------------------------------------------------
+    # 通道切换（刷新直方图）
+    # ------------------------------------------------------------------
+    def _on_channel_changed(self) -> None:
         if self.input_rgb is None:
             return
-        rgba, alpha = self._apply_bg_removal(self.input_rgb)
-        self._display_alpha_preview(rgba)
-        self.status_message(f"前景比例: {np.mean(alpha) / 255 * 100:.1f}%")
+        self._compute_histogram()
+        self._draw_histogram()
+        self._mark_dirty()
 
-    def _display_alpha_preview(self, rgba: np.ndarray) -> None:
-        """用棋盘格背景叠加 RGBA 显示预览。"""
+    # ------------------------------------------------------------------
+    # 通道直方图计算与绘制
+    # ------------------------------------------------------------------
+    CHANNEL_MAP = [
+        "luminance", "saturation", "red", "green", "blue"
+    ]
+
+    def _channel_index_from_combo(self) -> str:
+        idx = self._ch_channel.currentIndex()
+        return self.CHANNEL_MAP[idx] if 0 <= idx < len(self.CHANNEL_MAP) else "luminance"
+
+    def _compute_histogram(self) -> None:
+        """计算通道直方图数据。"""
+        if self.input_rgb is None:
+            return
+        img = self.input_rgb.astype(np.float32)
+        r_ch = img[:, :, 0]
+        g_ch = img[:, :, 1]
+        b_ch = img[:, :, 2]
+        channel_str = self._channel_index_from_combo()
+
+        if channel_str == "luminance":
+            vals = 0.299 * r_ch + 0.587 * g_ch + 0.114 * b_ch
+        elif channel_str == "saturation":
+            vmax = np.maximum(np.maximum(r_ch, g_ch), b_ch)
+            vmin = np.minimum(np.minimum(r_ch, g_ch), b_ch)
+            delta = vmax - vmin
+            denom = np.where(vmax == 0, 1.0, vmax)
+            vals = (delta / denom) * 255.0
+        elif channel_str == "red":
+            vals = r_ch
+        elif channel_str == "green":
+            vals = g_ch
+        else:
+            vals = b_ch
+
+        hist, _ = np.histogram(vals.ravel(), bins=256, range=(0, 256))
+        self._histogram_data = hist.astype(np.float32)
+
+    def _draw_histogram(self) -> None:
+        """用 QPixmap 绘制通道直方图。"""
+        if self._histogram_data is None:
+            return
+
+        w = max(self._hist_canvas.width(), 300)
+        h = 120
+        canvas = np.zeros((h, w, 3), dtype=np.uint8)
+        canvas[:, :] = [24, 24, 27]
+
+        hist = self._histogram_data.copy()
+        max_val = float(np.percentile(hist[hist > 0], 99)) if hist.max() > 0 else 1.0
+
+        min_thr = self._ch_min.value()
+        max_thr = self._ch_max.value()
+
+        for i in range(256):
+            bar_h = int(min(h - 8, (hist[i] / max_val) * (h - 8)))
+            x = int((i / 255.0) * w)
+            in_range = min_thr <= i <= max_thr
+            color = [16, 185, 129] if in_range else [113, 113, 122]
+            alpha = 165 if in_range else 64
+            # blend bar with background
+            canvas[h - 4 - bar_h:h - 4, x:x + 1] = np.clip(
+                np.array(color, dtype=np.float32) * (alpha / 255.0) +
+                24 * ((255 - alpha) / 255.0),
+                0, 255
+            ).astype(np.uint8)
+
+        # 阈值线
+        x_min = int((min_thr / 255.0) * w)
+        x_max = int((max_thr / 255.0) * w)
+        canvas[:, x_min:x_min + 1, :] = [16, 185, 129]
+        canvas[:, x_max:x_max + 1, :] = [16, 185, 129]
+
+        qimg = QImage(canvas.data, w, h, 3 * w, QImage.Format_RGB888).copy()
+        self._hist_canvas.setPixmap(QPixmap.fromImage(qimg))
+
+    # ------------------------------------------------------------------
+    # 核心: 生成结果
+    # ------------------------------------------------------------------
+    def _get_current_mode(self) -> str:
+        for mode_val, btn in self._mode_buttons.items():
+            if btn.isChecked():
+                return mode_val
+        return "color"
+
+    def _get_result(self) -> Optional[np.ndarray]:
+        """根据当前模式和参数生成处理结果。"""
+        if self.input_rgb is None:
+            return None
+        img = self.input_rgb
+        mode = self._get_current_mode()
+
+        try:
+            if mode == "color":
+                bg: Optional[Tuple[int, int, int]] = None
+                if self._bg_color_picked and self._bg_color_preview is not None:
+                    r, g, b = int(self._bg_color_preview[2]), \
+                              int(self._bg_color_preview[1]), \
+                              int(self._bg_color_preview[0])
+                    bg = (b, g, r)  # RGB -> BGR for the algo
+                elif self.bg_color is not None:
+                    r, g, b = int(self.bg_color[2]), \
+                              int(self.bg_color[1]), \
+                              int(self.bg_color[0])
+                    bg = (b, g, r)
+
+                return remove_background_color(
+                    img,
+                    tolerance=float(self._c_tolerance.value()),
+                    contiguous_only=self._c_contiguous.isChecked(),
+                    target_color=bg,
+                    feather=float(self._c_feather.value()),
+                    anti_alias=self._c_anti_alias.isChecked(),
+                    chroma_key=self._c_chroma_key.isChecked(),
+                    edge_shrink=float(self._c_edge_shrink.value()),
+                )
+            elif mode == "channel":
+                return remove_background_channel(
+                    img,
+                    channel=self.CHANNEL_MAP[self._ch_channel.currentIndex()],
+                    min_threshold=float(self._ch_min.value()),
+                    max_threshold=float(self._ch_max.value()),
+                    invert=self._ch_invert.isChecked(),
+                    feather=float(self._ch_feather.value()),
+                    edge_shrink=float(self._ch_edge_shrink.value()),
+                )
+            elif mode == "ai":
+                QMessageBox.information(
+                    self, "AI 模式",
+                    "AI 模式需要下载 ONNX 模型文件（isnet.onnx）。\n\n"
+                    "请将模型文件放入项目目录，并在代码中指定 model_path。\n"
+                    "相关依赖: pip install onnxruntime"
+                )
+                return None
+        except Exception as exc:
+            QMessageBox.warning(self, "处理失败", str(exc))
+            return None
+        return None
+
+    # ------------------------------------------------------------------
+    # 预览刷新
+    # ------------------------------------------------------------------
+    def _refresh_preview(self) -> None:
+        """由 worker 完成信号触发，刷新预览。"""
+        pass  # 实际刷新由 _on_worker_done 处理
+
+    def _mark_dirty(self) -> None:
+        """标记参数已变动，等待用户点按钮处理。"""
+        if self.input_rgb is not None:
+            self._pending_refresh = True
+
+    def _do_process(self) -> None:
+        """启动后台处理（点按钮 / 切换模式）。"""
+        if self.input_rgb is None:
+            return
+
+        mode = self._get_current_mode()
+
+        # 通道模式：先刷新直方图（同步，快）
+        if mode == "channel":
+            self._compute_histogram()
+            self._draw_histogram()
+
+        # 取消旧的 worker
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.quit()
+            self._worker.wait(500)
+        self._pending_refresh = False
+        self.status_message("处理中…")
+
+        self._worker = BGRWorker(
+            mode=mode,
+            input_rgb=self.input_rgb,
+            bg_color_preview=getattr(self, "_bg_color_preview", None),
+            bg_color_picked=getattr(self, "_bg_color_picked", False),
+            bg_color=self.bg_color,
+            c_tolerance=self._c_tolerance.value(),
+            c_contiguous=self._c_contiguous.isChecked(),
+            c_feather=self._c_feather.value(),
+            c_anti_alias=self._c_anti_alias.isChecked(),
+            c_chroma_key=self._c_chroma_key.isChecked(),
+            c_edge_shrink=self._c_edge_shrink.value(),
+            ch_channel=self.CHANNEL_MAP[self._ch_channel.currentIndex()],
+            ch_min=self._ch_min.value(),
+            ch_max=self._ch_max.value(),
+            ch_invert=self._ch_invert.isChecked(),
+            ch_feather=self._ch_feather.value(),
+            ch_edge_shrink=self._ch_edge_shrink.value(),
+        )
+        self._worker.finished.connect(self._on_worker_done)
+        self._worker.failed.connect(self._on_worker_failed)
+        self._worker.start()
+
+    def _on_worker_done(self, result: "np.ndarray | None") -> None:
+        """后台处理完成，刷新预览。"""
+        if result is None:
+            self.status_message("处理未产生结果")
+            return
+        self.output_rgba = result
+        self._display_preview(result)
+        fg_ratio = np.mean(result[:, :, 3]) / 255.0 * 100
+        mode = self._get_current_mode()
+        self.status_message(f"前景比例: {fg_ratio:.1f}%  |  模式: {mode}")
+
+    def _on_worker_failed(self, msg: str) -> None:
+        QMessageBox.warning(self, "处理失败", msg)
+
+    def _on_clear_panel(self) -> None:
+        """清除当前面板的图片、预览、状态。"""
+        self.input_image = None
+        self.input_rgb = None
+        self.output_rgba = None
+        self.bg_color = None
+        self.view_input.clear()
+        self.view_output.clear()
+        self.lbl_file.setText("未加载图片")
+        self.btn_detect.setEnabled(False)
+        self.btn_process.setEnabled(False)
+        self.btn_clear_panel.setEnabled(False)
+        self.btn_export_png.setEnabled(False)
+        self.btn_export_rgb.setEnabled(False)
+        self.btn_add_to_tray.setEnabled(False)
+        self._histogram_data = None
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.quit()
+            self._worker.wait(500)
+        self.status_message("已清除")
+
+    def _display_preview(self, rgba: np.ndarray) -> None:
+        """棋盘格背景叠加 RGBA 显示。"""
         h, w = rgba.shape[:2]
         cell = 8
         cb = np.zeros((h, w, 3), dtype=np.uint8)
         for r in range(h):
             for c in range(w):
-                b1 = ((r // cell) + (c // cell)) % 2 == 0
-                cb[r, c] = [200, 200, 200] if b1 else [120, 120, 120]
-
-        a = rgba[:, :, 3:4].astype(float) / 255.0
-        fg = rgba[:, :, :3].astype(float)
-        blended = (fg * a + cb * (1 - a)).astype(np.uint8)
+                cb[r, c] = [200, 200, 200] if ((r // cell) + (c // cell)) % 2 == 0 else [120, 120, 120]
+        a = rgba[:, :, 3:4].astype(np.float32) / 255.0
+        fg = rgba[:, :, :3].astype(np.float32)
+        blended = (fg * a + cb.astype(np.float32) * (1.0 - a)).astype(np.uint8)
         self.view_output.set_image(blended)
-
-    def load_from_buffer(self, image: np.ndarray) -> None:
-        self.input_image = np.ascontiguousarray(image, dtype=np.uint8)
-        self.input_rgb = self.input_image[..., :3] if self.input_image.shape[2] == 4 else self.input_image
-        self.lbl_file.setText("(暂存区)")
-        self.btn_detect.setEnabled(True)
-        self.btn_export_png.setEnabled(True)
-        self.btn_export_rgb.setEnabled(True)
-        self.btn_add_to_tray.setEnabled(True)
-        self.view_input.set_image(image)
-        self._detect_bg()
-        self._refresh_preview()
-
-    def status_message(self, msg: str) -> None:
-        win = self.window()
-        if win is not None and hasattr(win, "statusBar"):
-            sb = win.statusBar()
-            if sb is not None:
-                sb.showMessage(msg)
 
     # ------------------------------------------------------------------
     # 导出
     # ------------------------------------------------------------------
     def _export_png(self) -> None:
-        if self.input_rgb is None:
+        result = self.output_rgba or self._get_result()
+        if result is None:
             return
-        rgba, alpha = self._apply_bg_removal(self.input_rgb)
         path, _ = QFileDialog.getSaveFileName(
             self, "导出 PNG", self.last_saved_path or "", "PNG (*.png)"
         )
         if not path:
             return
         try:
-            pil_img = Image.fromarray(rgba, mode="RGBA")
-            pil_img.save(path, "PNG")
+            Image.fromarray(result, mode="RGBA").save(path, "PNG")
             self.last_saved_path = path
             self.status_message(f"已导出 {path}")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             QMessageBox.critical(self, "导出失败", str(exc))
 
     def _export_rgb(self) -> None:
-        if self.input_rgb is None:
+        result = self.output_rgba or self._get_result()
+        if result is None:
             return
-        rgba, alpha = self._apply_bg_removal(self.input_rgb)
         bg = self._bg_color_preview
         if bg is None:
             bg = np.array([255, 255, 255], dtype=np.uint8)
-
-        h, w = rgba.shape[:2]
+        h, w = result.shape[:2]
         b, g, r = bg
-        rgb = rgba[:, :, :3].copy()
-        a = alpha[:, :, None].astype(float) / 255.0
-        bg_img = np.full((h, w, 3), (b, g, r), dtype=np.uint8)
-        rgb = (rgb * a + bg_img * (1 - a)).astype(np.uint8)
+        rgb = result[:, :, :3].copy().astype(np.float32)
+        a = result[:, :, 3:4].astype(np.float32) / 255.0
+        bg_img = np.full((h, w, 3), (b, g, r), dtype=np.uint8).astype(np.float32)
+        rgb = (rgb * a + bg_img * (1.0 - a)).astype(np.uint8)
 
         path, _ = QFileDialog.getSaveFileName(
-            self, "导出图片", self.last_saved_path or "", "PNG (*.png);;JPEG (*.jpg)"
+            self, "导出图片", self.last_saved_path or "",
+            "PNG (*.png);;JPEG (*.jpg)"
         )
         if not path:
             return
@@ -1471,15 +1948,50 @@ class BackgroundRemoverWidget(QWidget):
                 pil_img.save(path, "PNG")
             self.last_saved_path = path
             self.status_message(f"已导出 {path}")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             QMessageBox.critical(self, "导出失败", str(exc))
 
     def _push_to_buffer(self) -> None:
-        if self.input_rgb is None or self._buf is None:
+        if self._buf is None:
             return
-        rgba, _ = self._apply_bg_removal(self.input_rgb)
-        self._buf.push(rgba, source_tab="去背景")
+        result = self.output_rgba or self._get_result()
+        if result is None:
+            return
+        self._buf.push(result, source_tab="去背景")
         self.status_message("已加入暂存区")
+
+    # ------------------------------------------------------------------
+    # 从暂存区加载
+    # ------------------------------------------------------------------
+    def load_from_buffer(self, image: np.ndarray) -> None:
+        self.input_image = np.ascontiguousarray(image, dtype=np.uint8)
+        self.input_rgb = (
+            self.input_image[..., :3]
+            if self.input_image.shape[2] == 4
+            else self.input_image
+        )
+        self.lbl_file.setText("(暂存区)")
+        self.btn_detect.setEnabled(True)
+        self.btn_clear_panel.setEnabled(True)
+        self.btn_export_png.setEnabled(True)
+        self.btn_export_rgb.setEnabled(True)
+        self.btn_add_to_tray.setEnabled(True)
+        self.view_input.set_image(self.input_image)
+        self.btn_process.setEnabled(True)
+        self._detect_bg()
+        self.status_message("已从暂存区加载，点击「启动处理」开始去背景")
+
+    # ------------------------------------------------------------------
+    # 状态栏
+    # ------------------------------------------------------------------
+    def status_message(self, msg: str) -> None:
+        win = self.window()
+        if win is not None and hasattr(win, "statusBar"):
+            sb = win.statusBar()
+            if sb is not None:
+                sb.showMessage(msg)
+
+
 
 
 class MainWindow(QMainWindow):
