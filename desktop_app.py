@@ -18,7 +18,7 @@ import cv2
 from PIL import Image
 
 from PySide6.QtCore import Qt, QThread, Signal, QSize, QObject
-from PySide6.QtGui import QAction, QImage, QPixmap, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QIcon, QImage, QPixmap, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -1617,9 +1617,85 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("PerfectPixelTool")
     app.setOrganizationName("PerfectPixelTool")
+    # 解析图标路径:开发期读 assets/,打包后读 _MEIPASS/assets/
+    base_dir = getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)
+    _png = Path(base_dir) / "assets" / "app_icon_src.png"
+    _ico = Path(base_dir) / "assets" / "app_icon.ico"
+
+    log_path = Path(base_dir) / "icon_debug.log"
+    try:
+        with open(log_path, "w") as f:
+            f.write(f"base_dir={base_dir}\n")
+            f.write(f"_png={_png} exists={_png.exists()}\n")
+            f.write(f"_ico={_ico} exists={_ico.exists()}\n")
+    except Exception:
+        pass
+
+    pix = None
+    if _png.exists():
+        pix = QPixmap(str(_png))
+        if not pix.isNull():
+            try:
+                with open(log_path, "a") as f:
+                    f.write(f"PNG loaded OK: {pix.width()}x{pix.height()}\n")
+            except Exception:
+                pass
+    if pix is None or pix.isNull():
+        if _ico.exists():
+            pix = QPixmap(str(_ico))
+            if not pix.isNull():
+                try:
+                    with open(log_path, "a") as f:
+                        f.write(f"ICO fallback loaded OK: {pix.width()}x{pix.height()}\n")
+                except Exception:
+                    pass
+    if pix is None or pix.isNull():
+        try:
+            with open(log_path, "a") as f:
+                f.write("WARNING: no icon loaded\n")
+        except Exception:
+            pass
+    else:
+        icon = QIcon(pix)
+        for s in (16, 24, 32, 48, 64, 128, 256):
+            icon.addPixmap(pix.scaled(s, s, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        app.setWindowIcon(icon)
 
     window = MainWindow()
     window.show()
+
+    # --- Win32 API: 强制刷新窗口图标句柄（解决标题栏/任务栏绿块） ---
+    if sys.platform == "win32":
+        import ctypes
+        try:
+            user32 = ctypes.windll.user32
+            SendMessageW = user32.SendMessageW
+
+            def set_icon(hwnd, icon_handle, which):
+                SendMessageW(hwnd, 0x0080, which, icon_handle)
+
+            hwnd = int(window.winId())
+            LoadImageW = user32.LoadImageW
+            _ico_path = str(_ico if _ico.exists() else _png)
+            hicon = LoadImageW(None, _ico_path, 1, 0, 0, 2 | 0x10)
+            if hicon:
+                set_icon(hwnd, hicon, 0)
+                set_icon(hwnd, hicon, 1)
+                with open(log_path, "a") as f:
+                    f.write(f"WM_SETICON hicon={hicon}\n")
+            else:
+                with open(log_path, "a") as f:
+                    f.write("LoadImageW returned 0\n")
+        except Exception as ex:
+            with open(log_path, "a") as f:
+                f.write(f"Win32 error: {ex}\n")
+
+    try:
+        with open(log_path, "a") as f:
+            f.write("setWindowIcon done\n")
+    except Exception:
+        pass
+
     return app.exec()
 
 

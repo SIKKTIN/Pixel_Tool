@@ -46,8 +46,10 @@ python -m PyInstaller ^
     --onedir ^
     --windowed ^
     --name PerfectPixelTool ^
+    --icon=assets\app_icon.ico ^
     --paths=src ^
     --paths=src/watermark_remover/slbr_runtime ^
+    --add-data=assets/app_icon.ico;assets ^
     --hidden-import=PIL._tkinter_finder ^
     --hidden-import=perfect_pixel.perfect_pixel ^
     --hidden-import=perfect_pixel.perfect_pixel_noCV2 ^
