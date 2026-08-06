@@ -51,7 +51,8 @@ _CHECKER_PIXMAP: QPixmap | None = None
 def _make_checker_brush() -> QBrush:
     """生成一个 16×16 棋盘格 pixmap 作为 viewport 背景。
 
-    颜色采用与项目其他模块一致的深灰色调（#2a2a2a / #222）。
+    颜色采用与项目其他模块一致的深灰色调（#2a2a2a / #222），与图像内容
+    形成清晰对比，方便看清图像实际范围。
     """
     global _CHECKER_PIXMAP
     if _CHECKER_PIXMAP is not None and not _CHECKER_PIXMAP.isNull():
@@ -224,6 +225,10 @@ class CropBox(QGraphicsItemGroup):
         for name, (hx, hy) in positions.items():
             self._handles[name].setPos(hx, hy)
 
+    def set_handles_visible(self, visible: bool) -> None:
+        for h in self._handles.values():
+            h.setVisible(visible)
+
     def rect(self) -> QRectF:
         return self._rect
 
@@ -240,6 +245,10 @@ class CropView(QGraphicsView):
     DRAG_NONE   = 0
     DRAG_MOVE   = 1
     DRAG_HANDLE = 2
+
+    # 编辑模式
+    MODE_RESIZE = "resize"  # 调整大小（默认）：手柄拖拽 + 空白拉框
+    MODE_MOVE   = "move"    # 移动位置：只整体平移，禁用手柄和拉框
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -258,11 +267,14 @@ class CropView(QGraphicsView):
 
         self._pix_item: QGraphicsPixmapItem | None = None
         self._crop_box: CropBox | None = None
+        self._image_border: QGraphicsRectItem | None = None
+        self._image_border_inner: QGraphicsRectItem | None = None
         self._sel_rect = QRectF()
         self._zoom = 1.0
         self._min_zoom = 0.05
         self._max_zoom = 32.0
         self._image_size = (0, 0)
+        self._mode = self.MODE_RESIZE
 
         # 拖拽状态
         self._drag_mode = self.DRAG_NONE
@@ -289,8 +301,30 @@ class CropView(QGraphicsView):
         self._pix_item.setZValue(0)
         self._scene.addItem(self._pix_item)
 
+        # 图像边界框：醒目的黄色描边 + 外侧黑色描边（双色），即便缩很小也能看清
+        self._image_border = QGraphicsRectItem(QRectF(0, 0, w, h))
+        self._image_border.setZValue(1)
+        # 用复合笔画：底层黑（外晕）+ 上层亮黄（主边）
+        outer_pen = QPen(QColor(0, 0, 0, 200))
+        outer_pen.setWidthF(5.0)
+        outer_pen.setCosmetic(True)
+        self._image_border.setPen(outer_pen)
+        self._image_border.setBrush(Qt.NoBrush)
+        self._scene.addItem(self._image_border)
+
+        # 内层亮黄描边，盖在外黑边之上做主边
+        inner_pen = QPen(QColor(255, 215, 0, 255))  # gold
+        inner_pen.setWidthF(2.5)
+        inner_pen.setCosmetic(True)
+        self._image_border_inner = QGraphicsRectItem(QRectF(0, 0, w, h))
+        self._image_border_inner.setZValue(1.1)
+        self._image_border_inner.setPen(inner_pen)
+        self._image_border_inner.setBrush(Qt.NoBrush)
+        self._scene.addItem(self._image_border_inner)
+
         self._crop_box = CropBox()
         self._scene.addItem(self._crop_box)
+        self._crop_box.set_handles_visible(self._mode == self.MODE_RESIZE)
 
         self._sel_rect = QRectF(0, 0, w, h)
         self._crop_box.setRect(self._sel_rect)
@@ -304,6 +338,8 @@ class CropView(QGraphicsView):
         self._scene.clear()
         self._pix_item = None
         self._crop_box = None
+        self._image_border = None
+        self._image_border_inner = None
         self._placeholder = None
         PlaceholderText("(无图片)", self._scene, 180, 180)
         self._scene.setSceneRect(0, 0, 500, 400)
@@ -317,6 +353,15 @@ class CropView(QGraphicsView):
         self._crop_box.setRect(r)
         self.viewport().update()
         self.selection_changed.emit(r.toRect())
+
+    def set_mode(self, mode: str) -> None:
+        """切换编辑模式：MODE_RESIZE / MODE_MOVE."""
+        if mode not in (self.MODE_RESIZE, self.MODE_MOVE):
+            return
+        self._mode = mode
+        if self._crop_box is not None:
+            self._crop_box.set_handles_visible(mode == self.MODE_RESIZE)
+        self.viewport().update()
 
     def selection_rect(self) -> QRect:
         return self._sel_rect.toRect()
@@ -433,6 +478,13 @@ class CropView(QGraphicsView):
                 return name
         return None
 
+    def _is_in_or_near_selection(self, img_pt: QPointF) -> bool:
+        """移动模式用：扩大热区，把整框（含边框外 N 像素）都视为可拖。"""
+        if self._sel_rect.isEmpty():
+            return False
+        pad = max(8.0, HANDLE_SIZE * 2)
+        return self._sel_rect.adjusted(-pad, -pad, pad, pad).contains(img_pt)
+
     def mousePressEvent(self, event) -> None:
         if event.button() != Qt.LeftButton:
             super().mousePressEvent(event)
@@ -440,6 +492,20 @@ class CropView(QGraphicsView):
 
         scene_pt = self.mapToScene(event.pos())
         img_pt = self._map_to_image(scene_pt)
+
+        # 移动模式：禁用手柄拖拽和空白拉框，只能整体平移选区
+        if self._mode == self.MODE_MOVE:
+            # 整框（含边框）热区：即便鼠标落在边框/手柄附近也能拖
+            if self._is_in_or_near_selection(img_pt):
+                self._drag_mode = self.DRAG_MOVE
+                self._drag_start = img_pt
+                self._drag_rect_start = QRectF(self._sel_rect)
+                self.setCursor(Qt.ClosedHandCursor)
+                event.accept()
+            else:
+                # 框外点击不做任何事
+                event.accept()
+            return
 
         handle = self._hit_handle(scene_pt)
         if handle:
@@ -470,8 +536,16 @@ class CropView(QGraphicsView):
     def mouseMoveEvent(self, event) -> None:
         if self._drag_mode == self.DRAG_NONE:
             if self._crop_box:
-                h = self._hit_handle(self.mapToScene(event.pos()))
-                self.setCursor(self._cursor_for_handle(h) if h else Qt.ArrowCursor)
+                if self._mode == self.MODE_MOVE:
+                    # 移动模式：整框热区显示 OpenHandCursor，提示可拖
+                    img_pt = self._map_to_image(self.mapToScene(event.pos()))
+                    if self._is_in_or_near_selection(img_pt):
+                        self.setCursor(Qt.OpenHandCursor)
+                    else:
+                        self.setCursor(Qt.ArrowCursor)
+                else:
+                    h = self._hit_handle(self.mapToScene(event.pos()))
+                    self.setCursor(self._cursor_for_handle(h) if h else Qt.ArrowCursor)
             super().mouseMoveEvent(event)
             return
 
@@ -660,6 +734,28 @@ class ImageCropWidget(QWidget):
         tb.addWidget(btn_load)
 
         tb.addSpacing(16)
+        tb.addWidget(QLabel("模式:"))
+        self._mode_group = QButtonGroup(self)
+        self._mode_group.setExclusive(True)
+        mode_layout = QHBoxLayout()
+        mode_layout.setSpacing(4)
+        for idx, (label, mode, tip) in enumerate([
+            ("调整大小", CropView.MODE_RESIZE,
+             "调整大小：可拖拽 8 个手柄或在空白处拉出新框"),
+            ("移动位置", CropView.MODE_MOVE,
+             "移动位置：固定当前框大小，只能整体平移"),
+        ]):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setChecked(idx == 0)
+            btn.setToolTip(tip)
+            btn.mode_value = mode  # type: ignore[attr-defined]
+            self._mode_group.addButton(btn, idx)
+            mode_layout.addWidget(btn)
+        self._mode_group.idClicked.connect(self._on_mode_changed)
+        tb.addLayout(mode_layout)
+
+        tb.addSpacing(16)
         tb.addWidget(QLabel("W:"))
         self.spin_tw = QSpinBox()
         self.spin_tw.setRange(1, 8192)
@@ -809,6 +905,14 @@ class ImageCropWidget(QWidget):
     # ------------------------------------------------------------------
     # 选区 / 锚点 / 目标尺寸变化
     # ------------------------------------------------------------------
+    def _on_mode_changed(self, mode_id: int) -> None:
+        """工具栏模式按钮切换。"""
+        btn = self._mode_group.button(mode_id)
+        if btn is None:
+            return
+        mode = getattr(btn, "mode_value", CropView.MODE_RESIZE)
+        self.crop_view.set_mode(mode)
+
     def _on_selection_changed(self, rect: QRect) -> None:
         """选区被拖动/手柄调整后实时刷新 W/H 显示。"""
         if self._syncing:
