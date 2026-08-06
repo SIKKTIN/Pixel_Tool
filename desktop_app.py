@@ -2130,17 +2130,11 @@ class MainWindow(QMainWindow):
         self.manual_tab = ManualEditorWidget()
         self.tabs.addTab(self.manual_tab, "✏️ 手动编辑")
 
-        # ------- 预留 Tab -------
-        placeholder = QWidget()
-        ph_layout = QVBoxLayout(placeholder)
-        ph_layout.setAlignment(Qt.AlignCenter)
-        ph_label = QLabel(
-            "🚧 工具开发中…\n\n下一个工具会在此添加。"
-        )
-        ph_label.setAlignment(Qt.AlignCenter)
-        ph_label.setStyleSheet("color: #888; font-size: 16px;")
-        ph_layout.addWidget(ph_label)
-        self.tabs.addTab(placeholder, "➕ 即将到来")
+        # ------- 图像切割 Tab -------
+        from image_splitter import ImageSplitterWidget
+        ImageSplitterWidget.set_buffer_ref(image_buffer())
+        self.splitter_tab = ImageSplitterWidget()
+        self.tabs.addTab(self.splitter_tab, "✂️ 图像切割")
 
         root.addWidget(self.tabs, 1)
 
