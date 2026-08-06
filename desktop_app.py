@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -1164,6 +1165,7 @@ class BGRWorker(QThread):
         c_anti_alias, c_chroma_key, c_edge_shrink,
         ch_channel, ch_min, ch_max, ch_invert,
         ch_feather, ch_edge_shrink,
+        ai_model, ai_edge_shrink,
     ) -> None:
         super().__init__()
         self.mode = mode
@@ -1183,6 +1185,8 @@ class BGRWorker(QThread):
         self.ch_invert = ch_invert
         self.ch_feather = ch_feather
         self.ch_edge_shrink = ch_edge_shrink
+        self.ai_model = ai_model
+        self.ai_edge_shrink = ai_edge_shrink
 
     def run(self) -> None:
         try:
@@ -1226,6 +1230,12 @@ class BGRWorker(QThread):
                 feather=float(self.ch_feather),
                 edge_shrink=float(self.ch_edge_shrink),
             )
+        elif self.mode == "ai":
+            return remove_background_ai(
+                img,
+                model_path=self.ai_model,
+                edge_shrink=float(self.ai_edge_shrink),
+            )
         return None
 
 
@@ -1240,6 +1250,7 @@ class BackgroundRemoverWidget(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._buf: "ImageBuffer | None" = BackgroundRemoverWidget._buf
 
         self.input_image: np.ndarray | None = None   # 原始 RGBA uint8
         self.input_rgb: np.ndarray | None = None      # RGB 用于计算
@@ -1508,24 +1519,76 @@ class BackgroundRemoverWidget(QWidget):
     # 控件构建 — AI
     # ------------------------------------------------------------------
     def _build_ai_controls(self) -> None:
-        self._ai_model = QComboBox()
-        self._ai_model.addItems(["标准 (isnet)", "高性能 (isnet_fp16)", "轻量 (isnet_quint8)"])
-        self._ai_model.setFixedWidth(180)
+        # 模式选择: 内置模型 / 自定义路径
+        self._ai_mode = QComboBox()
+        self._ai_mode.addItems(["内置模型", "自定义路径"])
+        self._ai_mode.setFixedWidth(180)
+        self._ai_mode.currentIndexChanged.connect(self._on_ai_mode_changed)
+
+        # 内置模型路径（打包后指向 _internal/assets/models/isnet.onnx）
+        import sys
+        if getattr(sys, "frozen", False):
+            base = Path(sys._MEIPASS)
+        else:
+            base = Path(__file__).parent
+        self._ai_builtin_path = str(base / "assets" / "models" / "isnet.onnx")
+        self._ai_builtin_label = QLabel()
+        self._ai_builtin_label.setStyleSheet("color: #888; font-size: 12px;")
+        self._update_builtin_label()
+
+        # 自定义路径控件
+        self._ai_path = QLineEdit()
+        self._ai_path.setPlaceholderText("选择 ONNX 模型文件路径…")
+        self._ai_path.setReadOnly(True)
+
+        btn_browse = QPushButton("浏览…")
+        btn_browse.setFixedWidth(70)
+        btn_browse.clicked.connect(self._browse_ai_model)
+
+        path_row = QHBoxLayout()
+        path_row.addWidget(self._ai_path)
+        path_row.addWidget(btn_browse)
 
         self._ai_edge_shrink = QSpinBox()
         self._ai_edge_shrink.setRange(0, 20)
         self._ai_edge_shrink.setValue(0)
         self._ai_edge_shrink.setFixedWidth(100)
 
-        self._ai_status = QLabel("AI 模式需要下载 ONNX 模型文件（约 40MB）")
+        self._ai_status = QLabel()
         self._ai_status.setStyleSheet("color: #888; font-size: 12px;")
 
         lay = QFormLayout(self._page_ai)
         lay.setContentsMargins(10, 14, 10, 10)
         lay.setSpacing(8)
-        lay.addRow("模型", self._ai_model)
+        lay.addRow("选择模式", self._ai_mode)
+        lay.addRow("内置路径", self._ai_builtin_label)
+        lay.addRow("自定义路径", path_row)
         lay.addRow("边缘收缩 (px)", self._ai_edge_shrink)
         lay.addRow("说明", self._ai_status)
+        self._on_ai_mode_changed(0)
+
+    def _update_builtin_label(self) -> None:
+        exists = Path(self._ai_builtin_path).exists()
+        if exists:
+            self._ai_builtin_label.setText(f"  {self._ai_builtin_path}")
+        else:
+            self._ai_builtin_label.setText(f"  [未找到] {self._ai_builtin_path}")
+            self._ai_builtin_label.setStyleSheet("color: #c55; font-size: 12px;")
+
+    def _on_ai_mode_changed(self, index: int) -> None:
+        if index == 0:  # 内置模型
+            self._ai_path.setEnabled(False)
+            self._ai_status.setText("使用打包时内置的 isnet 模型，无需额外下载。")
+        else:  # 自定义路径
+            self._ai_path.setEnabled(True)
+            self._ai_status.setText("提示: 推荐使用 isnet-general-use.onnx")
+
+    def _browse_ai_model(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择 ONNX 模型文件", "", "ONNX 模型 (*.onnx);;所有文件 (*)"
+        )
+        if path:
+            self._ai_path.setText(path)
 
     # ------------------------------------------------------------------
     # 模式切换
@@ -1747,9 +1810,13 @@ class BackgroundRemoverWidget(QWidget):
 
     def _get_result(self) -> Optional[np.ndarray]:
         """根据当前模式和参数生成处理结果。"""
-        if self.input_rgb is None:
+        if self.input_image is None:
             return None
-        img = self.input_rgb
+        # 优先使用 RGBA，迭代时 alpha 信息可以保护已透明区域
+        if self.input_image.shape[2] == 4:
+            img = self.input_image
+        else:
+            img = self.input_rgb
         mode = self._get_current_mode()
 
         try:
@@ -1787,13 +1854,12 @@ class BackgroundRemoverWidget(QWidget):
                     edge_shrink=float(self._ch_edge_shrink.value()),
                 )
             elif mode == "ai":
-                QMessageBox.information(
-                    self, "AI 模式",
-                    "AI 模式需要下载 ONNX 模型文件（isnet.onnx）。\n\n"
-                    "请将模型文件放入项目目录，并在代码中指定 model_path。\n"
-                    "相关依赖: pip install onnxruntime"
+                model_path = self._ai_builtin_path if self._ai_mode.currentIndex() == 0 else self._ai_path.text()
+                return remove_background_ai(
+                    img,
+                    model_path=model_path,
+                    edge_shrink=float(self._ai_edge_shrink.value()),
                 )
-                return None
         except Exception as exc:
             QMessageBox.warning(self, "处理失败", str(exc))
             return None
@@ -1818,6 +1884,16 @@ class BackgroundRemoverWidget(QWidget):
 
         mode = self._get_current_mode()
 
+        # AI 模式：验证模型文件
+        if mode == "ai":
+            if self._ai_mode.currentIndex() == 0:
+                model_path = self._ai_builtin_path
+            else:
+                model_path = self._ai_path.text()
+            if not model_path or not Path(model_path).is_file():
+                QMessageBox.warning(self, "缺少模型", "请选择有效的 ONNX 模型文件（.onnx）")
+                return
+
         # 通道模式：先刷新直方图（同步，快）
         if mode == "channel":
             self._compute_histogram()
@@ -1832,7 +1908,7 @@ class BackgroundRemoverWidget(QWidget):
 
         self._worker = BGRWorker(
             mode=mode,
-            input_rgb=self.input_rgb,
+            input_rgb=self.input_image if self.input_image is not None and self.input_image.shape[2] == 4 else self.input_rgb,
             bg_color_preview=getattr(self, "_bg_color_preview", None),
             bg_color_picked=getattr(self, "_bg_color_picked", False),
             bg_color=self.bg_color,
@@ -1848,6 +1924,8 @@ class BackgroundRemoverWidget(QWidget):
             ch_invert=self._ch_invert.isChecked(),
             ch_feather=self._ch_feather.value(),
             ch_edge_shrink=self._ch_edge_shrink.value(),
+            ai_model=self._ai_builtin_path if self._ai_mode.currentIndex() == 0 else self._ai_path.text(),
+            ai_edge_shrink=self._ai_edge_shrink.value(),
         )
         self._worker.finished.connect(self._on_worker_done)
         self._worker.failed.connect(self._on_worker_failed)
@@ -1953,9 +2031,11 @@ class BackgroundRemoverWidget(QWidget):
 
     def _push_to_buffer(self) -> None:
         if self._buf is None:
+            QMessageBox.warning(self, "暂存区不可用", "暂存区未初始化，请检查主程序")
             return
-        result = self.output_rgba or self._get_result()
+        result = self.output_rgba if self.output_rgba is not None else self._get_result()
         if result is None:
+            QMessageBox.warning(self, "无可用结果", "请先加载图片并启动处理")
             return
         self._buf.push(result, source_tab="去背景")
         self.status_message("已加入暂存区")
@@ -2040,9 +2120,15 @@ class MainWindow(QMainWindow):
             self.tabs.addTab(placeholder_wm, "🪄 去水印")
 
         # ------- 去背景 Tab -------
+        BackgroundRemoverWidget.set_buffer_ref(image_buffer())
         self.bg_tab = BackgroundRemoverWidget()
         self.tabs.addTab(self.bg_tab, "🎭 去背景")
-        BackgroundRemoverWidget.set_buffer_ref(image_buffer())
+
+        # ------- 手动编辑 Tab -------
+        from manual_editor import ManualEditorWidget
+        ManualEditorWidget.set_buffer_ref(image_buffer())
+        self.manual_tab = ManualEditorWidget()
+        self.tabs.addTab(self.manual_tab, "✏️ 手动编辑")
 
         # ------- 预留 Tab -------
         placeholder = QWidget()

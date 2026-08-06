@@ -452,10 +452,17 @@ def remove_background_color(
     else:
         bg_color = target_color
 
+    # ---- 迭代支持：把已透明的像素 RGB 强制置为目标背景色，并预先标记 visited ----
+    # 这样多次迭代去除背景时，之前已抠掉的区域不会被颜色匹配误判回前景
+    visited = (data[:, :, 3] == 0).astype(np.uint8)
+    transparent_mask = visited == 1
+    if transparent_mask.any():
+        data[transparent_mask, 0] = bg_color[0]
+        data[transparent_mask, 1] = bg_color[1]
+        data[transparent_mask, 2] = bg_color[2]
+
     max_dist = 441.67
     tolerance_distance = (tolerance / 100.0) * max_dist
-
-    visited = np.zeros((height, width), dtype=np.uint8)
 
     # ---- 洪水填充 ----
     if contiguous_only:
@@ -580,6 +587,11 @@ def remove_background_channel(
     orig_alpha = data[:, :, 3].astype(np.float32)
     new_alpha = np.round((orig_alpha / 255.0) * lut[np.clip(ch_vals, 0, 255).astype(np.uint8)])
     data[:, :, 3] = np.clip(new_alpha, 0, 255).astype(np.uint8)
+
+    # 迭代支持：保持已抠掉（alpha=0）的区域为透明，避免二次迭代被反转
+    transparent_mask = orig_alpha == 0
+    if transparent_mask.any():
+        data[transparent_mask, 3] = 0
 
     if edge_shrink > 0:
         _apply_edge_shrink(data, height, width, edge_shrink)

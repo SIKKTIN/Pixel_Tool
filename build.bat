@@ -50,6 +50,7 @@ python -m PyInstaller ^
     --paths=src ^
     --paths=src/watermark_remover/slbr_runtime ^
     --add-data=assets/app_icon.ico;assets ^
+    --add-data=assets/models;assets/models ^
     --hidden-import=PIL._tkinter_finder ^
     --hidden-import=perfect_pixel.perfect_pixel ^
     --hidden-import=perfect_pixel.perfect_pixel_noCV2 ^
@@ -91,6 +92,7 @@ python -m PyInstaller ^
     --hidden-import=PySide6.QtWidgets ^
     --hidden-import=cv2 ^
     --hidden-import=numpy ^
+    --hidden-import=onnxruntime ^
     --hidden-import=PIL ^
     --hidden-import=PIL.Image ^
     desktop_app.py

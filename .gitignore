@@ -16,3 +16,8 @@ output/
 *.log
 
 .DS_Store
+
+# AI 模型(>100MB,体积太大不进 git;通过 README 说明下载方式)
+assets/models/*.onnx
+assets/models/*.pt
+assets/models/*.pth
