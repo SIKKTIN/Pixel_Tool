@@ -660,15 +660,6 @@ class ImageCropWidget(QWidget):
         tb.addWidget(btn_load)
 
         tb.addSpacing(16)
-        tb.addWidget(QLabel("W/H:"))
-        self.chk_resize = QCheckBox("锁定")
-        self.chk_resize.setChecked(False)
-        self.chk_resize.setToolTip(
-            "锁定后，调整 W 或 H 时会按比例自动调整另一边；\n"
-            "也可在右边 spinbox 直接修改裁剪框尺寸。"
-        )
-        tb.addWidget(self.chk_resize)
-
         tb.addWidget(QLabel("W:"))
         self.spin_tw = QSpinBox()
         self.spin_tw.setRange(1, 8192)
@@ -686,11 +677,6 @@ class ImageCropWidget(QWidget):
         self.spin_th.setToolTip("裁剪框当前高度（也可在此修改框大小）")
         self.spin_th.valueChanged.connect(self._on_target_changed)
         tb.addWidget(self.spin_th)
-
-        self.chk_resize.toggled.connect(self._on_lock_toggled)
-        # 锁定时用比例联动两边的 spin
-        self.spin_tw.valueChanged.connect(self._sync_aspect_from_w)
-        self.spin_th.valueChanged.connect(self._sync_aspect_from_h)
 
         tb.addSpacing(16)
         tb.addWidget(QLabel("锚点:"))
@@ -761,7 +747,7 @@ class ImageCropWidget(QWidget):
         self.btn_to_buf.clicked.connect(self._on_to_buffer)
         action.addWidget(self.btn_to_buf)
         action.addStretch(1)
-        self.lbl_status = QLabel("打开或从暂存区载入图片，拖拽选区。输出尺寸 = 选区原尺寸（可勾选「缩放到」调整）。")
+        self.lbl_status = QLabel("打开或从暂存区载入图片，拖拽选区。W/H 实时显示框尺寸，也可直接输入。")
         self.lbl_status.setStyleSheet("color: #888; font-size: 11px;")
         action.addWidget(self.lbl_status)
         root.addLayout(action)
@@ -836,49 +822,7 @@ class ImageCropWidget(QWidget):
         finally:
             self.spin_tw.blockSignals(False)
             self.spin_th.blockSignals(False)
-
-    def _on_lock_toggled(self, checked: bool) -> None:
-        """切换锁定时，根据当前选区的宽高比自动填充一个。"""
-        if not checked or self._source is None:
-            return
-        sel = self.crop_view.selection_rect()
-        if sel.width() < 1 or sel.height() < 1:
-            return
-        # 已有一个数时，按比例回填另一个
-        if self.spin_tw.value() == 0 or self.spin_th.value() == 0:
-            return
-
-    def _sync_aspect_from_w(self, v: int) -> None:
-        """锁定比例时，调 W 自动按比例调 H。"""
-        if not self.chk_resize.isChecked() or self._source is None:
-            return
-        sel = self.crop_view.selection_rect()
-        if sel.width() < 1:
-            return
-        ratio = sel.height() / sel.width()
-        new_h = max(1, int(round(v * ratio)))
-        self._syncing = True
-        try:
-            self.spin_th.blockSignals(True)
-            self.spin_th.setValue(new_h)
-        finally:
-            self.spin_th.blockSignals(False)
-
-    def _sync_aspect_from_h(self, v: int) -> None:
-        """锁定比例时，调 H 自动按比例调 W。"""
-        if not self.chk_resize.isChecked() or self._source is None:
-            return
-        sel = self.crop_view.selection_rect()
-        if sel.height() < 1:
-            return
-        ratio = sel.width() / sel.height()
-        new_w = max(1, int(round(v * ratio)))
-        self._syncing = True
-        try:
-            self.spin_tw.blockSignals(True)
-            self.spin_tw.setValue(new_w)
-        finally:
-            self.spin_tw.blockSignals(False)
+            self._syncing = False
 
     def _on_target_changed(self) -> None:
         """用户在 W/H spinbox 里改值 → 调整当前选区大小（左上角为基准），并即时刷新预览。"""
@@ -950,27 +894,14 @@ class ImageCropWidget(QWidget):
 
         x, y, w, h = sel.x(), sel.y(), sel.width(), sel.height()
         cropped = self._source[y : y + h, x : x + w].copy()
-
         out_w, out_h = w, h
-        if self.chk_resize.isChecked():
-            tw = self.spin_tw.value()
-            th = self.spin_th.value()
-            if cropped.shape[1] != tw or cropped.shape[0] != th:
-                import cv2
-                cropped = cv2.resize(cropped, (tw, th), interpolation=cv2.INTER_NEAREST)
-                out_w, out_h = tw, th
 
         self._result = np.ascontiguousarray(cropped, dtype=np.uint8)
         self.preview_view.load(self._result)
 
-        if self.chk_resize.isChecked():
-            status = f"已缩放至 {out_w}×{out_h}"
-            size_text = f"{out_w}×{out_h}（缩放后）"
-        else:
-            status = "按选区原尺寸输出"
-            size_text = f"{out_w}×{out_h}"
+        size_text = f"{out_w}×{out_h}"
 
-        self.lbl_result.setText(f"裁剪: ({x},{y}) {w}×{h} → {size_text}  |  {status}")
+        self.lbl_result.setText(f"裁剪: ({x},{y}) {w}×{h} → {size_text}")
         self.btn_export.setEnabled(True)
 
     def _update_preview(self) -> None:
@@ -989,19 +920,9 @@ class ImageCropWidget(QWidget):
         h = min(h, self._src_h - y)
         cropped = self._source[y : y + h, x : x + w].copy()
         out_w, out_h = w, h
-        if self.chk_resize.isChecked():
-            tw = self.spin_tw.value()
-            th = self.spin_th.value()
-            if cropped.shape[1] != tw or cropped.shape[0] != th:
-                import cv2
-                cropped = cv2.resize(cropped, (tw, th), interpolation=cv2.INTER_NEAREST)
-                out_w, out_h = tw, th
         self._result = np.ascontiguousarray(cropped, dtype=np.uint8)
         self.preview_view.load(self._result)
-        if self.chk_resize.isChecked():
-            size_text = f"{out_w}×{out_h}（缩放后）"
-        else:
-            size_text = f"{out_w}×{out_h}"
+        size_text = f"{out_w}×{out_h}"
         self.lbl_result.setText(f"裁剪: ({x},{y}) {w}×{h} → {size_text}")
         self.btn_export.setEnabled(True)
         self.btn_to_buf.setEnabled(True)
