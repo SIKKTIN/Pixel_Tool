@@ -454,7 +454,11 @@ from perfect_pixel.background_remover import (
 # ---------------------------------------------------------------------------
 
 def numpy_to_qpixmap(arr: np.ndarray) -> QPixmap:
-    """H x W x 3/4 uint8 -> QPixmap。RGBA 时自动画棋盘格底再合成。"""
+    """H x W x 3/4 uint8 -> QPixmap。RGBA 时自动画棋盘格底再合成。
+
+    Qt 的 Format_RGB888/Format_RGBA8888 字节顺序与 numpy 一致（R-G-B[-A]），
+    直接传 stride = w * 通道数 即可。
+    """
     if arr.ndim == 2:
         arr = np.stack([arr] * 3, axis=-1)
     arr = np.ascontiguousarray(arr, dtype=np.uint8)
@@ -469,11 +473,13 @@ def numpy_to_qpixmap(arr: np.ndarray) -> QPixmap:
                 chk[row, col] = [204, 232][((row // tile) + (col // tile)) % 2]
         # 合成：前景用 alpha 加权叠加
         a = arr[:, :, 3:4].astype(np.float32) / 255.0
-        chk = chk.astype(np.float32)
+        chk_f = chk.astype(np.float32)
         rgb = arr[:, :, :3].astype(np.float32)
-        blended = (rgb * a + chk * (1 - a)).astype(np.uint8)
-        # Format_RGB888: QImage 字节顺序 = R-G-B，与 numpy RGB 完全一致
-        qimg = QImage(blended.data, w, h, 3 * w, QImage.Format_RGB888).copy()
+        blended = (rgb * a + chk_f * (1 - a)).astype(np.uint8)
+        # 拼成 RGBA（A=255）
+        blended_rgba = np.dstack([blended, np.full((h, w), 255, dtype=np.uint8)])
+        qimg = QImage(blended_rgba.data, w, h, blended_rgba.strides[0],
+                      QImage.Format_RGBA8888).copy()
     else:
         qimg = QImage(arr.data, w, h, 3 * w, QImage.Format_RGB888).copy()
     return QPixmap.fromImage(qimg)
@@ -2136,6 +2142,12 @@ class MainWindow(QMainWindow):
         ImageSplitterWidget.set_buffer_ref(image_buffer())
         self.splitter_tab = ImageSplitterWidget()
         self.tabs.addTab(self.splitter_tab, "✂️ 图像切割")
+
+        # ------- 裁剪到目标尺寸 Tab -------
+        from image_crop import ImageCropWidget
+        ImageCropWidget.set_buffer_ref(image_buffer())
+        self.crop_tab = ImageCropWidget()
+        self.tabs.addTab(self.crop_tab, "🎯 裁剪到目标尺寸")
 
         root.addWidget(self.tabs, 1)
 
