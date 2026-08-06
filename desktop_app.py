@@ -472,6 +472,7 @@ def numpy_to_qpixmap(arr: np.ndarray) -> QPixmap:
         chk = chk.astype(np.float32)
         rgb = arr[:, :, :3].astype(np.float32)
         blended = (rgb * a + chk * (1 - a)).astype(np.uint8)
+        # Format_RGB888: QImage 字节顺序 = R-G-B，与 numpy RGB 完全一致
         qimg = QImage(blended.data, w, h, 3 * w, QImage.Format_RGB888).copy()
     else:
         qimg = QImage(arr.data, w, h, 3 * w, QImage.Format_RGB888).copy()
@@ -819,7 +820,7 @@ class ImageView(QWidget):
             int(size.width() * self._scale),
             int(size.height() * self._scale),
             Qt.KeepAspectRatio,
-            Qt.SmoothTransformation,
+            Qt.FastTransformation,
         )
         self._label.setPixmap(scaled)
         self._label.resize(scaled.size())
