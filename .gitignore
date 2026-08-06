@@ -12,6 +12,8 @@ __pycache__/
 *.pyo
 
 output/
+output*.png
+compare*.png
 
 *.log
 
@@ -21,3 +23,6 @@ output/
 assets/models/*.onnx
 assets/models/*.pt
 assets/models/*.pth
+
+# SLBR / HuggingFace 运行时缓存
+models/.cache/
