@@ -2147,7 +2147,7 @@ class MainWindow(QMainWindow):
         from image_crop import ImageCropWidget
         ImageCropWidget.set_buffer_ref(image_buffer())
         self.crop_tab = ImageCropWidget()
-        self.tabs.addTab(self.crop_tab, "🎯 裁剪到目标尺寸")
+        self.tabs.addTab(self.crop_tab, "✂️ 图像剪切")
 
         root.addWidget(self.tabs, 1)
 
@@ -2190,8 +2190,8 @@ class MainWindow(QMainWindow):
         if img is None:
             return
         w = self.tabs.currentWidget()
-        if w is not None and hasattr(w, "load_from_buffer"):
-            w.load_from_buffer(img)
+        if w is not None and hasattr(w, "load"):
+            w.load(img)
 
     # ------------------------------------------------------------------
     # 工具栏快捷键:按当前 Tab 分发

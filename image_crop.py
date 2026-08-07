@@ -650,16 +650,12 @@ class PreviewView(QGraphicsView):
         self._pix_item = QGraphicsPixmapItem(pil_to_qpixmap(np_to_pil(arr)))
         self._pix_item.setZValue(0)
         self._scene.addItem(self._pix_item)
-
-        # 1px 边界框，让用户看清图片范围
         border = QGraphicsRectItem(0, 0, w, h)
         border.setPen(_xp_border_pen())
         border.setBrush(QBrush(Qt.NoBrush))
         border.setZValue(0.5)
         self._scene.addItem(border)
         self._border_item = border
-
-        # 加 padding 让 border 不贴住 viewport 边缘
         pad = 16
         self._scene.setSceneRect(-pad, -pad, w + 2 * pad, h + 2 * pad)
         self.fit_to_view()
@@ -742,14 +738,13 @@ class ImageCropWidget(QWidget):
         for idx, (label, mode, tip) in enumerate([
             ("调整大小", CropView.MODE_RESIZE,
              "调整大小：可拖拽 8 个手柄或在空白处拉出新框"),
-            ("移动位置", CropView.MODE_MOVE,
-             "移动位置：固定当前框大小，只能整体平移"),
+            ("移动", CropView.MODE_MOVE,
+             "移动位置：只整体平移，禁用手柄和拉框"),
         ]):
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.setChecked(idx == 0)
             btn.setToolTip(tip)
-            btn.mode_value = mode  # type: ignore[attr-defined]
             self._mode_group.addButton(btn, idx)
             mode_layout.addWidget(btn)
         self._mode_group.idClicked.connect(self._on_mode_changed)
@@ -817,55 +812,86 @@ class ImageCropWidget(QWidget):
         src_wrap.addWidget(self.lbl_info)
         body.addLayout(src_wrap, 2)
 
-        prev_wrap = QVBoxLayout()
-        prev_wrap.setSpacing(4)
-        hdr2 = QLabel("裁剪结果预览")
+        res_wrap = QVBoxLayout()
+        res_wrap.setSpacing(4)
+        hdr2 = QLabel("裁剪预览")
         hdr2.setStyleSheet("font-weight: bold; font-size: 13px;")
-        prev_wrap.addWidget(hdr2)
+        res_wrap.addWidget(hdr2)
         self.preview_view = PreviewView()
-        prev_wrap.addWidget(self.preview_view, 1)
-        self.lbl_result = QLabel("")
-        self.lbl_result.setStyleSheet("color: #888; font-size: 11px;")
-        prev_wrap.addWidget(self.lbl_result)
-        body.addLayout(prev_wrap, 1)
+        res_wrap.addWidget(self.preview_view, 1)
+        self.lbl_res = QLabel("暂无结果")
+        self.lbl_res.setStyleSheet("color: #888; font-size: 11px;")
+        res_wrap.addWidget(self.lbl_res)
+        body.addLayout(res_wrap, 1)
 
-        root.addLayout(body, 1)
+        root.addLayout(body)
 
-        # ---- 底部动作 ----
-        action = QHBoxLayout()
-        action.setSpacing(8)
-        self.btn_export = QPushButton("导出 PNG")
-        self.btn_export.setEnabled(False)
-        self.btn_export.clicked.connect(self._on_export)
-        action.addWidget(self.btn_export)
-        self.btn_to_buf = QPushButton("加入暂存区")
-        self.btn_to_buf.setEnabled(False)
-        self.btn_to_buf.clicked.connect(self._on_to_buffer)
-        action.addWidget(self.btn_to_buf)
-        action.addStretch(1)
-        self.lbl_status = QLabel("打开或从暂存区载入图片，拖拽选区。W/H 实时显示框尺寸，也可直接输入。")
-        self.lbl_status.setStyleSheet("color: #888; font-size: 11px;")
-        action.addWidget(self.lbl_status)
-        root.addLayout(action)
+        # ---- 底部按钮 ----
+        bottom = QHBoxLayout()
+        bottom.addStretch(1)
+        btn_out = QPushButton("导出裁剪结果到暂存区")
+        btn_out.setStyleSheet("font-weight: bold;")
+        btn_out.clicked.connect(self._on_export)
+        bottom.addWidget(btn_out)
+        root.addLayout(bottom)
 
-    # ------------------------------------------------------------------
-    # 载入
-    # ------------------------------------------------------------------
+        self._update_preview()
+
+    def load(self, arr: np.ndarray | None) -> None:
+        """供暂存区双击调用：将图片送入裁剪视图。"""
+        self.crop_view.load_image(arr)
+        if arr is not None:
+            h, w = arr.shape[:2]
+            self.lbl_info.setText(f"图像尺寸: {w} × {h}")
+
+    def _on_load_buffer(self) -> None:
+        if self._buf is None:
+            QMessageBox.warning(self, "暂存区不可用", "暂存区未初始化")
+            return
+        items = self._buf.items()
+        if not items:
+            QMessageBox.information(self, "暂存区为空", "暂存区目前没有图片。")
+            return
+        names = [it.get("name", it["id"][:8]) for it in items]
+        item, ok = QInputDialog.getItem(self, "选择图片", "从暂存区选择：", names, 0, False)
+        if not ok or not item:
+            return
+        idx = names.index(item)
+        arr = items[idx].get("image")
+        if arr is None:
+            QMessageBox.warning(self, "图片缺失", "该条目没有图片数据。")
+            return
+        self._load(arr, items[idx].get("name", ""))
+
+    def _load(self, arr: np.ndarray, name: str = "") -> None:
+        self._source = arr
+        self._src_h, self._src_w = arr.shape[:2]
+        self._src_tab = name
+        self._result = None
+        self.crop_view.load_image(arr)
+        self.lbl_info.setText(f"{name}  {self._src_w}×{self._src_h}" if name else f"  {self._src_w}×{self._src_h}")
+        self.spin_tw.setValue(self._src_w)
+        self.spin_th.setValue(self._src_h)
+        self._update_preview()
+
     def _on_open(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "打开图片", "",
-            "图片 (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff)",
-        )
+        path, _ = QFileDialog.getOpenFileName(self, "打开图片", "", "图片 (*.png *.jpg *.jpeg *.bmp *.gif *.webp);;所有文件 (*.*)")
         if not path:
             return
         try:
-            pil_img = Image.open(path).convert("RGBA")
-            arr = np.array(pil_img, dtype=np.uint8)
+            arr = imageio.imread(path)
         except Exception as exc:
             QMessageBox.critical(self, "打开失败", f"无法读取图片：\n{exc}")
             return
         name = path.split("/")[-1]
         self._load(arr, f"裁剪: {name}")
+
+    def load(self, arr: np.ndarray | None) -> None:
+        """供暂存区双击调用：将图片送入裁剪视图。"""
+        self.crop_view.load_image(arr)
+        if arr is not None:
+            h, w = arr.shape[:2]
+            self.lbl_info.setText(f"图像尺寸: {w} × {h}")
 
     def _on_load_buffer(self) -> None:
         if self._buf is None:
