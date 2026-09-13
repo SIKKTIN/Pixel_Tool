@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
 from PIL import Image
 from PIL.ImageQt import ImageQt
 
-from desktop_app import ImageBuffer
+from perfect_pixel.app_core.image_buffer import ImageBuffer
 
 
 # ---------------------------------------------------------------------------

@@ -42,7 +42,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from desktop_app import ImageView, ImageBuffer, image_buffer, numpy_to_qpixmap
+from desktop_app import ImageView, numpy_to_qpixmap
+from perfect_pixel.app_core.image_buffer import ImageBuffer, image_buffer
 
 
 # ---------------------------------------------------------------------------

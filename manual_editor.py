@@ -41,7 +41,8 @@ from PySide6.QtWidgets import (
 )
 
 # 复用同项目的预览控件 + utils
-from desktop_app import ImageView, ImageBuffer
+from desktop_app import ImageView
+from perfect_pixel.app_core.image_buffer import ImageBuffer
 
 
 # ---------------------------------------------------------------------------
