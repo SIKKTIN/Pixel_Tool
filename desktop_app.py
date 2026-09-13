@@ -1435,6 +1435,19 @@ class BackgroundRemoverWidget(QWidget):
         preview_wrap.addWidget(self.view_input, 1)
         preview_wrap.addWidget(self.view_aux, 1)
         preview_wrap.addWidget(self.view_output, 1)
+        self._bw_preview_row = QWidget()
+        bw_row_layout = QHBoxLayout(self._bw_preview_row)
+        bw_row_layout.setContentsMargins(0, 0, 0, 0)
+        bw_row_layout.setSpacing(10)
+        self._bw_black_preview = ImageView("黑底输入")
+        self._bw_white_preview = ImageView("白底输入")
+        bw_row_layout.addWidget(self._bw_black_preview, 1)
+        bw_row_layout.addWidget(self._bw_white_preview, 1)
+        self._bw_result_preview = ImageView("合成结果")
+        preview_wrap.addWidget(self._bw_preview_row, 1)
+        preview_wrap.addWidget(self._bw_result_preview, 1)
+        self._bw_preview_row.setVisible(False)
+        self._bw_result_preview.setVisible(False)
         self.view_aux.setVisible(False)
         pw = QWidget()
         pw.setLayout(preview_wrap)
@@ -1761,12 +1774,11 @@ class BackgroundRemoverWidget(QWidget):
             if which == "black":
                 self._bw_black_image = image
                 self._bw_black_label.setText(Path(path).name)
+                self._bw_black_preview.set_image(image)
             else:
                 self._bw_white_image = image
                 self._bw_white_label.setText(Path(path).name)
-                self.view_aux.set_image(image)
-            if which == "black":
-                self.view_input.set_image(image)
+                self._bw_white_preview.set_image(image)
             self._mark_dirty()
             if self._bw_black_image is not None and self._bw_white_image is not None:
                 self.btn_process.setEnabled(True)
@@ -1820,13 +1832,21 @@ class BackgroundRemoverWidget(QWidget):
         self.view_aux.setVisible(mode == "black_white")
         self.view_input.setVisible(True)
         if mode == "black_white":
-            self.view_input.title_label.setText("黑底输入")
-            self.view_output.title_label.setText("合成结果")
+            self.view_input.setVisible(False)
+            self.view_aux.setVisible(False)
+            self.view_output.setVisible(False)
+            self._bw_preview_row.setVisible(True)
+            self._bw_result_preview.setVisible(True)
             if self._bw_black_image is not None:
-                self.view_input.set_image(self._bw_black_image)
+                self._bw_black_preview.set_image(self._bw_black_image)
             if self._bw_white_image is not None:
-                self.view_aux.set_image(self._bw_white_image)
+                self._bw_white_preview.set_image(self._bw_white_image)
         else:
+            self.view_input.setVisible(True)
+            self.view_aux.setVisible(False)
+            self.view_output.setVisible(True)
+            self._bw_preview_row.setVisible(False)
+            self._bw_result_preview.setVisible(False)
             self.view_input.title_label.setText("原图")
             self.view_output.title_label.setText("处理结果预览")
         # Background colour resampling only applies to the colour mode.
@@ -2210,9 +2230,9 @@ class BackgroundRemoverWidget(QWidget):
         self.output_rgba = result
         if self._get_current_mode() == "black_white":
             if self._bw_black_image is not None:
-                self.view_input.set_image(self._bw_black_image)
+                self._bw_black_preview.set_image(self._bw_black_image)
             if self._bw_white_image is not None:
-                self.view_aux.set_image(self._bw_white_image)
+                self._bw_white_preview.set_image(self._bw_white_image)
         self._display_preview(result)
         fg_ratio = np.mean(result[:, :, 3]) / 255.0 * 100
         mode = self._get_current_mode()
@@ -2230,6 +2250,9 @@ class BackgroundRemoverWidget(QWidget):
         self.view_input.clear()
         self.view_aux.clear()
         self.view_output.clear()
+        self._bw_black_preview.clear()
+        self._bw_white_preview.clear()
+        self._bw_result_preview.clear()
         self._bw_black_image = None
         self._bw_white_image = None
         self.lbl_file.setText("未加载图片")
@@ -2256,7 +2279,10 @@ class BackgroundRemoverWidget(QWidget):
         a = rgba[:, :, 3:4].astype(np.float32) / 255.0
         fg = rgba[:, :, :3].astype(np.float32)
         blended = (fg * a + cb.astype(np.float32) * (1.0 - a)).astype(np.uint8)
-        self.view_output.set_image(blended)
+        if self._get_current_mode() == "black_white":
+            self._bw_result_preview.set_image(blended)
+        else:
+            self.view_output.set_image(blended)
 
     # ------------------------------------------------------------------
     # 导出
