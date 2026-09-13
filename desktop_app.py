@@ -1159,7 +1159,7 @@ class BGRWorker(QThread):
         ai_model, ai_edge_shrink,
         checker_tile_size, checker_tolerance, checker_anti_alias, checker_binary_alpha,
         checker_cleanup_islands, checker_min_component_size, checker_edge_shrink,
-        checker_cleanup_residuals,
+        residual_min_component_size, residual_edge_strength, residual_edge_radius, residual_anti_alias,
     ) -> None:
         super().__init__()
         self.mode = mode
@@ -1188,7 +1188,10 @@ class BGRWorker(QThread):
         self.checker_cleanup_islands = checker_cleanup_islands
         self.checker_min_component_size = checker_min_component_size
         self.checker_edge_shrink = checker_edge_shrink
-        self.checker_cleanup_residuals = checker_cleanup_residuals
+        self.residual_min_component_size = residual_min_component_size
+        self.residual_edge_strength = residual_edge_strength
+        self.residual_edge_radius = residual_edge_radius
+        self.residual_anti_alias = residual_anti_alias
 
     def run(self) -> None:
         try:
@@ -1251,12 +1254,16 @@ class BGRWorker(QThread):
                 min_component_size=int(self.checker_min_component_size),
                 edge_shrink=int(self.checker_edge_shrink),
             )
-            if self.checker_cleanup_residuals and cleanup_background_residuals is not None:
-                result = cleanup_background_residuals(
-                    result, min_component_size=4, edge_strength=28.0,
-                    edge_radius=1, anti_alias=not bool(self.checker_binary_alpha),
-                )
             return result
+        elif self.mode == "residuals":
+            if cleanup_background_residuals is None:
+                raise RuntimeError("残余清理模块不可用")
+            return cleanup_background_residuals(
+                img, min_component_size=int(self.residual_min_component_size),
+                edge_strength=float(self.residual_edge_strength),
+                edge_radius=int(self.residual_edge_radius),
+                anti_alias=bool(self.residual_anti_alias),
+            )
         return None
 
 
@@ -1319,7 +1326,7 @@ class BackgroundRemoverWidget(QWidget):
 
         self._mode_group = QButtonGroup()
         self._mode_buttons: dict[str, QPushButton] = {}
-        for idx, (label, val) in enumerate([("按颜色", "color"), ("按通道", "channel"), ("棋盘格背景", "checkerboard"), ("AI 智能", "ai")]):
+        for idx, (label, val) in enumerate([("按颜色", "color"), ("按通道", "channel"), ("棋盘格背景", "checkerboard"), ("残余清理", "residuals"), ("AI 智能", "ai")]):
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.setMinimumWidth(82)
@@ -1394,10 +1401,12 @@ class BackgroundRemoverWidget(QWidget):
         self._page_color = QWidget()
         self._page_channel = QWidget()
         self._page_checkerboard = QWidget()
+        self._page_residuals = QWidget()
         self._page_ai = QWidget()
         self._param_stack.addWidget(self._page_color)
         self._param_stack.addWidget(self._page_channel)
         self._param_stack.addWidget(self._page_checkerboard)
+        self._param_stack.addWidget(self._page_residuals)
         self._param_stack.addWidget(self._page_ai)
 
         # --- 右:预览 ---
@@ -1416,6 +1425,7 @@ class BackgroundRemoverWidget(QWidget):
         self._build_color_controls()
         self._build_channel_controls()
         self._build_checkerboard_controls()
+        self._build_residual_controls()
         self._build_ai_controls()
 
     def detach_shared_controls(self) -> QWidget:
@@ -1590,9 +1600,6 @@ class BackgroundRemoverWidget(QWidget):
         self._checker_edge_shrink.setRange(0, 8)
         self._checker_edge_shrink.setValue(1)
         self._checker_edge_shrink.valueChanged.connect(self._mark_dirty)
-        self._checker_cleanup_residuals = QCheckBox("二次清理残余色块")
-        self._checker_cleanup_residuals.setChecked(True)
-        self._checker_cleanup_residuals.toggled.connect(self._mark_dirty)
 
         lay = QFormLayout(self._page_checkerboard)
         lay.setContentsMargins(10, 14, 10, 10)
@@ -1604,7 +1611,6 @@ class BackgroundRemoverWidget(QWidget):
         lay.addRow("后处理", self._checker_cleanup_islands)
         lay.addRow("最小色块尺寸", self._checker_min_component_size)
         lay.addRow("轮廓收缩 (px)", self._checker_edge_shrink)
-        lay.addRow("二次处理", self._checker_cleanup_residuals)
 
     def _on_checker_anti_alias_toggled(self, checked: bool) -> None:
         if checked and self._checker_binary_alpha.isChecked():
@@ -1672,6 +1678,30 @@ class BackgroundRemoverWidget(QWidget):
         lay.addRow("说明", self._ai_status)
         self._on_ai_mode_changed(0)
 
+    def _build_residual_controls(self) -> None:
+        self._residual_min_component_size = QSpinBox()
+        self._residual_min_component_size.setRange(1, 10000)
+        self._residual_min_component_size.setValue(4)
+        self._residual_min_component_size.valueChanged.connect(self._mark_dirty)
+        self._residual_edge_strength = QSpinBox()
+        self._residual_edge_strength.setRange(0, 255)
+        self._residual_edge_strength.setValue(28)
+        self._residual_edge_strength.valueChanged.connect(self._mark_dirty)
+        self._residual_edge_radius = QSpinBox()
+        self._residual_edge_radius.setRange(0, 8)
+        self._residual_edge_radius.setValue(1)
+        self._residual_edge_radius.valueChanged.connect(self._mark_dirty)
+        self._residual_anti_alias = QCheckBox("保留抗锯齿边缘")
+        self._residual_anti_alias.setChecked(True)
+        self._residual_anti_alias.toggled.connect(self._mark_dirty)
+        lay = QFormLayout(self._page_residuals)
+        lay.setContentsMargins(10, 14, 10, 10)
+        lay.setSpacing(8)
+        lay.addRow("最小独立色块尺寸", self._residual_min_component_size)
+        lay.addRow("边缘颜色差异", self._residual_edge_strength)
+        lay.addRow("边缘清理半径 (px)", self._residual_edge_radius)
+        lay.addRow("边缘处理", self._residual_anti_alias)
+
     def _update_builtin_label(self) -> None:
         exists = Path(self._ai_builtin_path).exists()
         if exists:
@@ -1705,12 +1735,13 @@ class BackgroundRemoverWidget(QWidget):
                 return
 
     def _show_mode_controls(self, mode: str) -> None:
-        index_map = {"color": 0, "channel": 1, "checkerboard": 2, "ai": 3}
+        index_map = {"color": 0, "channel": 1, "checkerboard": 2, "residuals": 3, "ai": 4}
         self._param_stack.setCurrentIndex(index_map.get(mode, 0))
         title_map = {
             "color": "按颜色 — 处理参数",
             "channel": "按通道 — 处理参数",
             "checkerboard": "棋盘格背景 — 处理参数",
+            "residuals": "残余色块清理 — 处理参数",
             "ai": "AI 智能 — 处理参数",
         }
         self._param_box.setTitle(title_map.get(mode, "参数"))
@@ -1982,9 +2013,15 @@ class BackgroundRemoverWidget(QWidget):
                     min_component_size=self._checker_min_component_size.value(),
                     edge_shrink=self._checker_edge_shrink.value(),
                 )
-                if self._checker_cleanup_residuals.isChecked() and cleanup_background_residuals is not None:
-                    result = cleanup_background_residuals(result, min_component_size=4, edge_strength=28.0, edge_radius=1, anti_alias=not self._checker_binary_alpha.isChecked())
                 return result
+            elif mode == "residuals":
+                return cleanup_background_residuals(
+                    img,
+                    min_component_size=self._residual_min_component_size.value(),
+                    edge_strength=float(self._residual_edge_strength.value()),
+                    edge_radius=self._residual_edge_radius.value(),
+                    anti_alias=self._residual_anti_alias.isChecked(),
+                )
         except Exception as exc:
             QMessageBox.warning(self, "处理失败", str(exc))
             return None
@@ -2058,7 +2095,10 @@ class BackgroundRemoverWidget(QWidget):
             checker_cleanup_islands=self._checker_cleanup_islands.isChecked(),
             checker_min_component_size=self._checker_min_component_size.value(),
             checker_edge_shrink=self._checker_edge_shrink.value(),
-            checker_cleanup_residuals=self._checker_cleanup_residuals.isChecked(),
+            residual_min_component_size=self._residual_min_component_size.value(),
+            residual_edge_strength=self._residual_edge_strength.value(),
+            residual_edge_radius=self._residual_edge_radius.value(),
+            residual_anti_alias=self._residual_anti_alias.isChecked(),
         )
         self._worker.finished.connect(self._on_worker_done)
         self._worker.failed.connect(self._on_worker_failed)
