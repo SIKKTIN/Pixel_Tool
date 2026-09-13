@@ -1,4 +1,5 @@
 import numpy as np
+import unittest
 
 from perfect_pixel.fake_checkerboard import remove_fake_checkerboard
 
@@ -38,3 +39,14 @@ def test_auto_tile_detection():
     result = remove_fake_checkerboard(img, tolerance=14, binary_alpha=True)
     assert result[15, 18, 3] == 255
     assert result[0, 0, 3] == 0
+
+
+class FakeCheckerboardTests(unittest.TestCase):
+    def test_checkerboard_removed_and_foreground_preserved(self):
+        test_checkerboard_removed_and_foreground_preserved()
+
+    def test_existing_alpha_and_soft_edge(self):
+        test_existing_alpha_and_soft_edge()
+
+    def test_auto_tile_detection(self):
+        test_auto_tile_detection()
