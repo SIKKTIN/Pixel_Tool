@@ -95,7 +95,7 @@ async def main() -> None:
             await request("notifications/initialized", notification=True)
             result = await request("tools/list")
             names = {tool["name"] for tool in result["tools"]}
-            assert names == {"resize_image", "refine_pixel_art", "remove_image_background", "remove_fake_checkerboard", "launch_desktop_app", "check_desktop_startup", "check_splitter_drag", "inspect_image", "check_project_health"}, names
+            assert names == {"resize_image", "refine_pixel_art", "remove_image_background", "remove_fake_checkerboard", "cleanup_background_residuals", "launch_desktop_app", "check_desktop_startup", "check_splitter_drag", "inspect_image", "check_project_health"}, names
             print("PASS tools/list: " + ", ".join(sorted(names)))
             await call("resize_image", {"input_path": str(source), "width": 32, "height": 48})
             metadata = await call("inspect_image", {"input_path": str(source)})

@@ -22,6 +22,7 @@ if str(_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(_ROOT / "src"))
 
 from perfect_pixel import get_perfect_pixel, remove_fake_checkerboard as _remove_fake_checkerboard
+from perfect_pixel import cleanup_background_residuals as _cleanup_background_residuals
 from perfect_pixel.background_remover import remove_background
 from perfect_pixel.app_core.image_io import load_rgb, save_png
 from perfect_pixel.app_core.image_io import load_rgba
@@ -163,6 +164,41 @@ def remove_fake_checkerboard(
         "partial_alpha_pixels": int(np.count_nonzero((alpha > 0) & (alpha < 255))),
         "removed_island_pixels": int(max(0, np.count_nonzero(baseline_alpha > 0) - np.count_nonzero(alpha > 0))),
         "edge_shrink": int(edge_shrink),
+        "remaining_components": int(_count_components(alpha > 0)),
+    }
+
+
+@mcp.tool()
+def cleanup_background_residuals(
+    input_path: str,
+    min_component_size: int = 4,
+    edge_strength: float = 28.0,
+    edge_radius: int = 1,
+    anti_alias: bool = True,
+) -> dict[str, Any]:
+    """Second pass for residual islands and matte-coloured cutout fringes."""
+    if min_component_size < 1:
+        raise ValueError("min_component_size must be at least 1")
+    if edge_radius < 0 or edge_radius > 8:
+        raise ValueError("edge_radius must be between 0 and 8")
+    if edge_strength < 0 or edge_strength > 255:
+        raise ValueError("edge_strength must be between 0 and 255")
+    p = Path(input_path).expanduser().resolve()
+    if not p.is_file():
+        raise FileNotFoundError(f"Image not found: {p}")
+    image = load_rgba(p)
+    result = _cleanup_background_residuals(
+        image, min_component_size=int(min_component_size),
+        edge_strength=float(edge_strength), edge_radius=int(edge_radius),
+        anti_alias=bool(anti_alias),
+    )
+    output = _save(result, "residual_cleanup")
+    alpha = result[..., 3]
+    return {
+        "output_path": str(output), "width": int(result.shape[1]),
+        "height": int(result.shape[0]), "mode": "RGBA",
+        "transparent_pixels": int(np.count_nonzero(alpha == 0)),
+        "partial_alpha_pixels": int(np.count_nonzero((alpha > 0) & (alpha < 255))),
         "remaining_components": int(_count_components(alpha > 0)),
     }
 

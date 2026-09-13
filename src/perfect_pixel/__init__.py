@@ -7,6 +7,7 @@ __version__ = "0.1.2"
 
 from .perfect_pixel_noCV2 import get_perfect_pixel as _get_perfect_pixel_numpy
 from .fake_checkerboard import remove_fake_checkerboard
+from .residual_cleanup import cleanup_background_residuals
 
 try:
     import cv2
@@ -16,4 +17,4 @@ except ImportError:
     _get_perfect_pixel_opencv = None
     get_perfect_pixel = _get_perfect_pixel_numpy
 
-__all__ = ["get_perfect_pixel", "remove_fake_checkerboard"]
+__all__ = ["get_perfect_pixel", "remove_fake_checkerboard", "cleanup_background_residuals"]

@@ -25,6 +25,7 @@ Exposed tools:
 - `inspect_image`
 - `check_project_health`
 - `remove_fake_checkerboard`
+- `cleanup_background_residuals`
 
 This is a stdio server: it waits for JSON-RPC input, has no browser page, and is
 normally started and stopped by an MCP client. A blank terminal is expected.
@@ -41,6 +42,8 @@ the file, which is useful when diagnosing transparent sprite exports.
 `min_component_size` (default 4), and `edge_shrink` (default 1) to remove
 isolated residual pixels and checker-coloured edge fringes while preserving
 connected foreground details.
+For an already processed image, `cleanup_background_residuals` runs the
+second-pass cleanup independently and returns a new RGBA PNG.
 `check_project_health` compiles project Python files and imports the core modules
 (and optionally the desktop module), making it safe to run before parallel
 feature work. `check_desktop_startup` separately constructs the Qt main window

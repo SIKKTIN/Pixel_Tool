@@ -378,8 +378,10 @@ from perfect_pixel.background_remover import (
 )
 try:
     from perfect_pixel.fake_checkerboard import remove_fake_checkerboard
+    from perfect_pixel.residual_cleanup import cleanup_background_residuals
 except ImportError:  # optional during staged development
     remove_fake_checkerboard = None
+    cleanup_background_residuals = None
 
 
 # ---------------------------------------------------------------------------
@@ -1157,6 +1159,7 @@ class BGRWorker(QThread):
         ai_model, ai_edge_shrink,
         checker_tile_size, checker_tolerance, checker_anti_alias, checker_binary_alpha,
         checker_cleanup_islands, checker_min_component_size, checker_edge_shrink,
+        checker_cleanup_residuals,
     ) -> None:
         super().__init__()
         self.mode = mode
@@ -1185,6 +1188,7 @@ class BGRWorker(QThread):
         self.checker_cleanup_islands = checker_cleanup_islands
         self.checker_min_component_size = checker_min_component_size
         self.checker_edge_shrink = checker_edge_shrink
+        self.checker_cleanup_residuals = checker_cleanup_residuals
 
     def run(self) -> None:
         try:
@@ -1237,7 +1241,7 @@ class BGRWorker(QThread):
         elif self.mode == "checkerboard":
             if remove_fake_checkerboard is None:
                 raise RuntimeError("棋盘格背景模块不可用")
-            return remove_fake_checkerboard(
+            result = remove_fake_checkerboard(
                 img,
                 tile_size=self.checker_tile_size,
                 tolerance=float(self.checker_tolerance),
@@ -1247,6 +1251,12 @@ class BGRWorker(QThread):
                 min_component_size=int(self.checker_min_component_size),
                 edge_shrink=int(self.checker_edge_shrink),
             )
+            if self.checker_cleanup_residuals and cleanup_background_residuals is not None:
+                result = cleanup_background_residuals(
+                    result, min_component_size=4, edge_strength=28.0,
+                    edge_radius=1, anti_alias=not bool(self.checker_binary_alpha),
+                )
+            return result
         return None
 
 
@@ -1580,6 +1590,9 @@ class BackgroundRemoverWidget(QWidget):
         self._checker_edge_shrink.setRange(0, 8)
         self._checker_edge_shrink.setValue(1)
         self._checker_edge_shrink.valueChanged.connect(self._mark_dirty)
+        self._checker_cleanup_residuals = QCheckBox("二次清理残余色块")
+        self._checker_cleanup_residuals.setChecked(True)
+        self._checker_cleanup_residuals.toggled.connect(self._mark_dirty)
 
         lay = QFormLayout(self._page_checkerboard)
         lay.setContentsMargins(10, 14, 10, 10)
@@ -1591,6 +1604,7 @@ class BackgroundRemoverWidget(QWidget):
         lay.addRow("后处理", self._checker_cleanup_islands)
         lay.addRow("最小色块尺寸", self._checker_min_component_size)
         lay.addRow("轮廓收缩 (px)", self._checker_edge_shrink)
+        lay.addRow("二次处理", self._checker_cleanup_residuals)
 
     def _on_checker_anti_alias_toggled(self, checked: bool) -> None:
         if checked and self._checker_binary_alpha.isChecked():
@@ -1958,7 +1972,7 @@ class BackgroundRemoverWidget(QWidget):
                 if remove_fake_checkerboard is None:
                     raise RuntimeError("棋盘格背景模块不可用")
                 tile = int(self._checker_tile_size.value()) or None
-                return remove_fake_checkerboard(
+                result = remove_fake_checkerboard(
                     img,
                     tile_size=tile,
                     tolerance=float(self._checker_tolerance.value()),
@@ -1968,6 +1982,9 @@ class BackgroundRemoverWidget(QWidget):
                     min_component_size=self._checker_min_component_size.value(),
                     edge_shrink=self._checker_edge_shrink.value(),
                 )
+                if self._checker_cleanup_residuals.isChecked() and cleanup_background_residuals is not None:
+                    result = cleanup_background_residuals(result, min_component_size=4, edge_strength=28.0, edge_radius=1, anti_alias=not self._checker_binary_alpha.isChecked())
+                return result
         except Exception as exc:
             QMessageBox.warning(self, "处理失败", str(exc))
             return None
@@ -2041,6 +2058,7 @@ class BackgroundRemoverWidget(QWidget):
             checker_cleanup_islands=self._checker_cleanup_islands.isChecked(),
             checker_min_component_size=self._checker_min_component_size.value(),
             checker_edge_shrink=self._checker_edge_shrink.value(),
+            checker_cleanup_residuals=self._checker_cleanup_residuals.isChecked(),
         )
         self._worker.finished.connect(self._on_worker_done)
         self._worker.failed.connect(self._on_worker_failed)
