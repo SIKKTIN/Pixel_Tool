@@ -1315,44 +1315,51 @@ class BackgroundRemoverWidget(QWidget):
         # 默认选中"按颜色"
         self._mode_buttons["color"].setChecked(True)
 
-        # ---- 操作区 --------------------------------------------------
+        # ---- 操作区：按职责分组，避免处理/导出/暂存按钮混在一起 ----
         action_row = QHBoxLayout()
-        action_row.setSpacing(8)
+        action_row.setSpacing(10)
 
+        process_box = QGroupBox("处理")
+        process_layout = QHBoxLayout(process_box)
+        process_layout.setContentsMargins(8, 4, 8, 4)
         self.btn_clear_panel = QPushButton("清除")
         self.btn_clear_panel.clicked.connect(self._on_clear_panel)
         self.btn_clear_panel.setEnabled(False)
-        action_row.addWidget(self.btn_clear_panel)
+        process_layout.addWidget(self.btn_clear_panel)
+        self.btn_detect = QPushButton("重新采样背景色")
+        self.btn_detect.clicked.connect(self._detect_bg)
+        self.btn_detect.setEnabled(False)
+        process_layout.addWidget(self.btn_detect)
+        self.btn_process = QPushButton("启动处理")
+        self.btn_process.clicked.connect(self._do_process)
+        self.btn_process.setEnabled(False)
+        self.btn_process.setStyleSheet("QPushButton { font-weight: bold; }")
+        process_layout.addWidget(self.btn_process)
+        action_row.addWidget(process_box)
 
+        output_box = QGroupBox("输出")
+        output_layout = QHBoxLayout(output_box)
+        output_layout.setContentsMargins(8, 4, 8, 4)
         self.btn_export_png = QPushButton("导出 PNG")
         self.btn_export_png.clicked.connect(self._export_png)
         self.btn_export_png.setEnabled(False)
-        action_row.addWidget(self.btn_export_png)
+        output_layout.addWidget(self.btn_export_png)
 
         self.btn_export_rgb = QPushButton("导出 RGB")
         self.btn_export_rgb.clicked.connect(self._export_rgb)
         self.btn_export_rgb.setEnabled(False)
-        action_row.addWidget(self.btn_export_rgb)
+        output_layout.addWidget(self.btn_export_rgb)
+        action_row.addWidget(output_box)
 
+        tray_box = QGroupBox("暂存区")
+        tray_layout = QHBoxLayout(tray_box)
+        tray_layout.setContentsMargins(8, 4, 8, 4)
         self.btn_add_to_tray = QPushButton("加入暂存区")
         self.btn_add_to_tray.clicked.connect(self._push_to_buffer)
         self.btn_add_to_tray.setEnabled(False)
-        action_row.addWidget(self.btn_add_to_tray)
-
+        tray_layout.addWidget(self.btn_add_to_tray)
+        action_row.addWidget(tray_box)
         action_row.addStretch(1)
-
-        self.btn_detect = QPushButton("重新采样背景色")
-        self.btn_detect.clicked.connect(self._detect_bg)
-        self.btn_detect.setEnabled(False)
-        action_row.addWidget(self.btn_detect)
-
-        self.btn_process = QPushButton("启动处理")
-        self.btn_process.clicked.connect(self._do_process)
-        self.btn_process.setEnabled(False)
-        self.btn_process.setStyleSheet(
-            "QPushButton { font-weight: bold; }"
-        )
-        action_row.addWidget(self.btn_process)
 
         self._shared_controls_layout.addLayout(action_row)
 
@@ -1671,6 +1678,8 @@ class BackgroundRemoverWidget(QWidget):
             "ai": "AI 智能 — 处理参数",
         }
         self._param_box.setTitle(title_map.get(mode, "参数"))
+        # Background colour resampling only applies to the colour mode.
+        self.btn_detect.setVisible(mode == "color")
 
     # ------------------------------------------------------------------
     # 拖拽
