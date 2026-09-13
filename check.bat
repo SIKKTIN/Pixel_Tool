@@ -9,7 +9,11 @@ if errorlevel 1 goto :fail
 echo [2/3] MCP smoke test
 "%PY%" -m mcp_server.smoke_test
 if errorlevel 1 goto :fail
-echo [3/3] Desktop construction
+echo [3/4] Core regression tests
+set PYTHONPATH=%~dp0src;%PYTHONPATH%
+"%PY%" -m unittest discover -s tests -v
+if errorlevel 1 goto :fail
+echo [4/4] Desktop construction
 set QT_QPA_PLATFORM=offscreen
 "%PY%" -c "from PySide6.QtWidgets import QApplication; from desktop_app import MainWindow; app=QApplication([]); w=MainWindow(); print('MAINWINDOW_OK tabs=' + str(w.tabs.count()))"
 if errorlevel 1 goto :fail
