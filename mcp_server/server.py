@@ -213,6 +213,7 @@ def remove_background_black_white(
     background_white: list[int] | None = None,
     anti_alias: bool = True,
     binary_alpha: bool = False,
+    edge_shrink: int = 0,
 ) -> dict[str, Any]:
     """Recover RGBA from aligned black- and white-background composites."""
     black_file = Path(black_path).expanduser().resolve()
@@ -223,11 +224,14 @@ def remove_background_black_white(
     bw = tuple(int(x) for x in (background_white or [255, 255, 255]))
     if len(bb) != 3 or len(bw) != 3 or any(x < 0 or x > 255 for x in (*bb, *bw)):
         raise ValueError("background colors must contain three values in 0..255")
+    if edge_shrink < 0 or edge_shrink > 8:
+        raise ValueError("edge_shrink must be between 0 and 8")
     black = load_rgba(black_file)
     white = load_rgba(white_file)
     result = _remove_background_black_white(
         black, white, background_black=bb, background_white=bw,
         anti_alias=bool(anti_alias), binary_alpha=bool(binary_alpha),
+        edge_shrink=int(edge_shrink),
     )
     error = _reconstruction_error(black, white, result, background_black=bb, background_white=bw)
     output = _save(result, "black_white")

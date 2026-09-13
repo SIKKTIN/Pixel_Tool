@@ -1068,7 +1068,7 @@ class ScaleWidget(QWidget):
     # 渲染与导出
     # ------------------------------------------------------------------
     def _current_output(self) -> np.ndarray | None:
-        if self.input_image is None:
+        if self.input_image is None and self._get_current_mode() != "black_white":
             return None
         target_w = self.spn_w.value()
         target_h = self.spn_h.value()
@@ -1162,7 +1162,7 @@ class BGRWorker(QThread):
         checker_tile_size, checker_tolerance, checker_anti_alias, checker_binary_alpha,
         checker_cleanup_islands, checker_min_component_size, checker_edge_shrink,
         residual_min_component_size, residual_edge_strength, residual_edge_radius, residual_anti_alias,
-        bw_black_image, bw_white_image, bw_anti_alias, bw_binary_alpha,
+        bw_black_image, bw_white_image, bw_anti_alias, bw_binary_alpha, bw_edge_shrink,
     ) -> None:
         super().__init__()
         self.mode = mode
@@ -1199,6 +1199,7 @@ class BGRWorker(QThread):
         self.bw_white_image = bw_white_image
         self.bw_anti_alias = bw_anti_alias
         self.bw_binary_alpha = bw_binary_alpha
+        self.bw_edge_shrink = bw_edge_shrink
 
     def run(self) -> None:
         try:
@@ -1276,7 +1277,7 @@ class BGRWorker(QThread):
                 raise ValueError("请先选择黑底图和白底图")
             return remove_background_black_white(
                 self.bw_black_image, self.bw_white_image,
-                anti_alias=bool(self.bw_anti_alias), binary_alpha=bool(self.bw_binary_alpha),
+                anti_alias=bool(self.bw_anti_alias), binary_alpha=bool(self.bw_binary_alpha), edge_shrink=int(self.bw_edge_shrink),
             )
         return None
 
@@ -1429,9 +1430,12 @@ class BackgroundRemoverWidget(QWidget):
         preview_wrap = QVBoxLayout()
         preview_wrap.setSpacing(10)
         self.view_input = ImageView("原图")
+        self.view_aux = ImageView("白底输入")
         self.view_output = ImageView("处理结果预览")
         preview_wrap.addWidget(self.view_input, 1)
+        preview_wrap.addWidget(self.view_aux, 1)
         preview_wrap.addWidget(self.view_output, 1)
+        self.view_aux.setVisible(False)
         pw = QWidget()
         pw.setLayout(preview_wrap)
         body.addWidget(pw, 1)
@@ -1733,6 +1737,10 @@ class BackgroundRemoverWidget(QWidget):
         self._bw_anti_alias.toggled.connect(self._mark_dirty)
         self._bw_binary_alpha = QCheckBox("二值透明（仅 0/255）")
         self._bw_binary_alpha.toggled.connect(self._mark_dirty)
+        self._bw_edge_shrink = QSpinBox()
+        self._bw_edge_shrink.setRange(0, 8)
+        self._bw_edge_shrink.setValue(0)
+        self._bw_edge_shrink.valueChanged.connect(self._mark_dirty)
         lay = QFormLayout(self._page_black_white)
         lay.setContentsMargins(10, 14, 10, 10)
         lay.setSpacing(8)
@@ -1742,6 +1750,7 @@ class BackgroundRemoverWidget(QWidget):
         lay.addRow("", self._bw_white_label)
         lay.addRow("边缘处理", self._bw_anti_alias)
         lay.addRow("", self._bw_binary_alpha)
+        lay.addRow("轮廓收缩 (px)", self._bw_edge_shrink)
 
     def _choose_bw_image(self, which: str) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "选择黑白底图片", "", "Images (*.png *.jpg *.jpeg *.bmp)")
@@ -1755,7 +1764,12 @@ class BackgroundRemoverWidget(QWidget):
             else:
                 self._bw_white_image = image
                 self._bw_white_label.setText(Path(path).name)
+                self.view_aux.set_image(image)
+            if which == "black":
+                self.view_input.set_image(image)
             self._mark_dirty()
+            if self._bw_black_image is not None and self._bw_white_image is not None:
+                self.btn_process.setEnabled(True)
         except Exception as exc:
             QMessageBox.warning(self, "打开失败", str(exc))
 
@@ -1803,6 +1817,18 @@ class BackgroundRemoverWidget(QWidget):
             "ai": "AI 智能 — 处理参数",
         }
         self._param_box.setTitle(title_map.get(mode, "参数"))
+        self.view_aux.setVisible(mode == "black_white")
+        self.view_input.setVisible(True)
+        if mode == "black_white":
+            self.view_input.title_label.setText("黑底输入")
+            self.view_output.title_label.setText("合成结果")
+            if self._bw_black_image is not None:
+                self.view_input.set_image(self._bw_black_image)
+            if self._bw_white_image is not None:
+                self.view_aux.set_image(self._bw_white_image)
+        else:
+            self.view_input.title_label.setText("原图")
+            self.view_output.title_label.setText("处理结果预览")
         # Background colour resampling only applies to the colour mode.
         self.btn_detect.setVisible(mode == "color")
 
@@ -2087,6 +2113,7 @@ class BackgroundRemoverWidget(QWidget):
                     self._bw_black_image, self._bw_white_image,
                     anti_alias=self._bw_anti_alias.isChecked(),
                     binary_alpha=self._bw_binary_alpha.isChecked(),
+                    edge_shrink=self._bw_edge_shrink.value(),
                 )
         except Exception as exc:
             QMessageBox.warning(self, "处理失败", str(exc))
@@ -2102,12 +2129,12 @@ class BackgroundRemoverWidget(QWidget):
 
     def _mark_dirty(self) -> None:
         """标记参数已变动，等待用户点按钮处理。"""
-        if self.input_rgb is not None:
+        if self.input_rgb is not None or (self._bw_black_image is not None and self._bw_white_image is not None):
             self._pending_refresh = True
 
     def _do_process(self) -> None:
         """启动后台处理（点按钮 / 切换模式）。"""
-        if self.input_rgb is None:
+        if self.input_rgb is None and not (self._bw_black_image is not None and self._bw_white_image is not None):
             return
 
         mode = self._get_current_mode()
@@ -2136,7 +2163,7 @@ class BackgroundRemoverWidget(QWidget):
 
         self._worker = BGRWorker(
             mode=mode,
-            input_rgb=self.input_image if self.input_image is not None and self.input_image.shape[2] == 4 else self.input_rgb,
+            input_rgb=(self._bw_black_image if mode == "black_white" and self._bw_black_image is not None else (self.input_image if self.input_image is not None and self.input_image.shape[2] == 4 else self.input_rgb)),
             bg_color_preview=getattr(self, "_bg_color_preview", None),
             bg_color_picked=getattr(self, "_bg_color_picked", False),
             bg_color=self.bg_color,
@@ -2169,6 +2196,7 @@ class BackgroundRemoverWidget(QWidget):
             bw_white_image=self._bw_white_image,
             bw_anti_alias=self._bw_anti_alias.isChecked(),
             bw_binary_alpha=self._bw_binary_alpha.isChecked(),
+            bw_edge_shrink=self._bw_edge_shrink.value(),
         )
         self._worker.finished.connect(self._on_worker_done)
         self._worker.failed.connect(self._on_worker_failed)
@@ -2180,6 +2208,11 @@ class BackgroundRemoverWidget(QWidget):
             self.status_message("处理未产生结果")
             return
         self.output_rgba = result
+        if self._get_current_mode() == "black_white":
+            if self._bw_black_image is not None:
+                self.view_input.set_image(self._bw_black_image)
+            if self._bw_white_image is not None:
+                self.view_aux.set_image(self._bw_white_image)
         self._display_preview(result)
         fg_ratio = np.mean(result[:, :, 3]) / 255.0 * 100
         mode = self._get_current_mode()
@@ -2195,7 +2228,10 @@ class BackgroundRemoverWidget(QWidget):
         self.output_rgba = None
         self.bg_color = None
         self.view_input.clear()
+        self.view_aux.clear()
         self.view_output.clear()
+        self._bw_black_image = None
+        self._bw_white_image = None
         self.lbl_file.setText("未加载图片")
         self.btn_detect.setEnabled(False)
         self.btn_process.setEnabled(False)

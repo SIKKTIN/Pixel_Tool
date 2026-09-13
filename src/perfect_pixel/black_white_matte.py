@@ -24,6 +24,7 @@ def remove_background_black_white(
     background_white: tuple[int, int, int] = (255, 255, 255),
     anti_alias: bool = True,
     binary_alpha: bool = False,
+    edge_shrink: int = 0,
 ) -> np.ndarray:
     """Reconstruct a foreground from two aligned composites."""
     b = normalize_rgba(black)[..., :3]
@@ -54,6 +55,15 @@ def remove_background_black_white(
         out_alpha = np.where(out_alpha >= 128, 255, 0).astype(np.uint8)
     out_rgb = np.round(np.clip(f_channels, 0.0, 1.0) * 255.0).astype(np.uint8)
     out = np.dstack((out_rgb, out_alpha))
+    for _ in range(max(0, int(edge_shrink))):
+        solid = out_alpha > 0
+        edge = np.zeros_like(solid)
+        edge[1:] |= ~solid[:-1]; edge[:-1] |= ~solid[1:]
+        edge[:, 1:] |= ~solid[:, :-1]; edge[:, :-1] |= ~solid[:, 1:]
+        out_alpha[solid & edge] = np.minimum(out_alpha[solid & edge], 96 if anti_alias and not binary_alpha else 0)
+    if binary_alpha or not anti_alias:
+        out_alpha = np.where(out_alpha >= 128, 255, 0).astype(np.uint8)
+    out[..., 3] = out_alpha
     out[out_alpha == 0, :3] = 0
     return np.ascontiguousarray(out)
 
