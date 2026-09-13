@@ -920,20 +920,25 @@ class ImageCropWidget(QWidget):
         # ---- 底部按钮 ----
         bottom = QHBoxLayout()
         bottom.addStretch(1)
-        btn_out = QPushButton("导出裁剪结果到暂存区")
-        btn_out.setStyleSheet("font-weight: bold;")
-        btn_out.clicked.connect(self._on_export)
-        bottom.addWidget(btn_out)
+        self.btn_out = QPushButton("导出裁剪结果到暂存区")
+        self.btn_out.setStyleSheet("font-weight: bold;")
+        self.btn_out.clicked.connect(self._on_to_buffer)
+        self.btn_out.setEnabled(False)
+        bottom.addWidget(self.btn_out)
         root.addLayout(bottom)
 
         self._update_preview()
 
     def load(self, arr: np.ndarray | None) -> None:
         """供暂存区双击调用：将图片送入裁剪视图。"""
-        self.crop_view.load_image(arr)
-        if arr is not None:
-            h, w = arr.shape[:2]
-            self.lbl_info.setText(f"图像尺寸: {w} × {h}")
+        if arr is None:
+            self._source = None
+            self.crop_view.clear()
+            self.preview_view.load(None)
+            self.btn_out.setEnabled(False)
+            self.lbl_info.setText("尚未载入图片")
+            return
+        self._load(arr, "")
 
     def _on_load_buffer(self) -> None:
         if self._buf is None:
@@ -1085,7 +1090,7 @@ class ImageCropWidget(QWidget):
         size_text = f"{out_w}×{out_h}"
 
         self.lbl_res.setText(f"裁剪: ({x},{y}) {w}×{h} → {size_text}")
-        self.btn_export.setEnabled(True)
+        self.btn_out.setEnabled(True)
 
     def _update_preview(self) -> None:
         """实时刷新预览（不弹错误对话框；选区/图片为空就直接清空）。"""
@@ -1107,9 +1112,8 @@ class ImageCropWidget(QWidget):
         self.preview_view.load(self._result)
         size_text = f"{out_w}×{out_h}"
         self.lbl_res.setText(f"裁剪: ({x},{y}) {w}×{h} → {size_text}")
-        self.btn_export.setEnabled(True)
-        self.btn_to_buf.setEnabled(True)
-        self.lbl_status.setText(f"裁剪完成：({x},{y}) {w}×{h} → {size_text}")
+        self.btn_out.setEnabled(True)
+        self.lbl_res.setText(f"裁剪完成：({x},{y}) {w}×{h} → {size_text}")
 
     def _masked_crop(self, x: int, y: int, w: int, h: int) -> np.ndarray:
         """Return the crop; an Alt-drawn polygon makes outside pixels transparent."""
@@ -1150,7 +1154,7 @@ class ImageCropWidget(QWidget):
                 Image.fromarray(rgb).save(path, "JPEG", quality=95)
             else:
                 pil.save(path, "PNG")
-            self.lbl_status.setText(f"已导出到: {path}")
+            self.lbl_res.setText(f"已导出到: {path}")
         except Exception as exc:
             QMessageBox.critical(self, "导出失败", str(exc))
 
@@ -1162,5 +1166,5 @@ class ImageCropWidget(QWidget):
             return
         tag = f"裁剪 {self._result.shape[1]}×{self._result.shape[0]}"
         self._buf.push(self._result, source_tab=self._src_tab or tag, source_file=tag)
-        self.lbl_status.setText(f"已加入暂存区：{tag}")
+        self.lbl_res.setText(f"已加入暂存区：{tag}")
         QMessageBox.information(self, "完成", f"已把结果图加入暂存区。\n{tag}")
