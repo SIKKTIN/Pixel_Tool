@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import sys
+import ctypes
 from pathlib import Path
 from typing import Optional
 
@@ -16,7 +17,7 @@ import numpy as np
 import cv2
 from PIL import Image
 
-from PySide6.QtCore import Qt, QThread, Signal, QSize, QObject
+from PySide6.QtCore import Qt, QThread, Signal, QSize, QObject, QEvent, QTimer
 from PySide6.QtGui import QAction, QIcon, QImage, QPixmap, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -43,11 +44,15 @@ from PySide6.QtWidgets import (
     QToolBar,
     QVBoxLayout,
     QWidget,
-    QSplitter,
     QButtonGroup,
     QLayout,
     QAbstractButton,
     QStackedLayout,
+    QDockWidget,
+    QFileSystemModel,
+    QTreeView,
+    QSplitter,
+    QSplitterHandle,
 )
 
 _PROJECT_ROOT = Path(__file__).resolve().parent
@@ -83,7 +88,7 @@ class ImageTrayWidget(QWidget):
         self._buf = buffer
         self._thumb_widgets: dict[str, QWidget] = {}
 
-        self.setFixedWidth(self.THUMB_SIZE * self.COLUMNS + 16)
+        self.setMinimumWidth(110)
         self.setMinimumHeight(200)
         self.setMaximumWidth(400)
 
@@ -371,6 +376,10 @@ from perfect_pixel.background_remover import (
     remove_background_ai,
     remove_background,
 )
+try:
+    from perfect_pixel.fake_checkerboard import remove_fake_checkerboard
+except ImportError:  # optional during staged development
+    remove_fake_checkerboard = None
 
 
 # ---------------------------------------------------------------------------
@@ -458,6 +467,7 @@ class PixelRefineWidget(QWidget):
         self.worker: RefineWorker | None = None
 
         root = QVBoxLayout(self)
+        self._root_layout = root
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(10)
 
@@ -497,13 +507,30 @@ class PixelRefineWidget(QWidget):
         self.chk_square.setChecked(True)
         ctrl_row.addWidget(self.chk_square)
 
+        ctrl_row.addWidget(QLabel("预览分辨率:"))
+        self.cmb_preview_zoom = QComboBox()
+        self.cmb_preview_zoom.addItems(["适应窗口", "25%", "50%", "100%", "200%", "400%", "800%"])
+        self.cmb_preview_zoom.setCurrentText("适应窗口")
+        self.cmb_preview_zoom.currentTextChanged.connect(self._apply_preview_zoom)
+        ctrl_row.addWidget(self.cmb_preview_zoom)
+
         self.btn_run = QPushButton("生成像素图")
         self.btn_run.setDefault(True)
         self.btn_run.clicked.connect(self.on_run)
         ctrl_row.addWidget(self.btn_run)
 
         ctrl_row.addStretch(1)
-        root.addLayout(ctrl_row)
+        self._shared_controls = QWidget()
+        # The same controls used to live in a wide top bar.  In the shared
+        # side panel they must be stacked vertically to avoid clipping.
+        shared_layout = QVBoxLayout(self._shared_controls)
+        shared_layout.setContentsMargins(0, 0, 0, 0)
+        shared_layout.setSpacing(6)
+        while ctrl_row.count():
+            item = ctrl_row.takeAt(0)
+            if item.widget() is not None:
+                shared_layout.addWidget(item.widget())
+        root.addWidget(self._shared_controls)
 
         # ---- 双列预览区 --------------------------------------------------
         preview_row = QHBoxLayout()
@@ -511,12 +538,33 @@ class PixelRefineWidget(QWidget):
 
         self.view_input = ImageView("原图")
         self.view_output = ImageView("像素化结果")
+        self.view_input.setMaximumHeight(560)
+        self.view_output.setMaximumHeight(560)
         for v in (self.view_input, self.view_output):
             preview_row.addWidget(v, 1)
         root.addLayout(preview_row, 1)
 
         # ---- 拖拽上传 ----------------------------------------------------
         self.setAcceptDrops(True)
+
+    def detach_shared_controls(self) -> QWidget:
+        """Move this module's controls into the shared tool panel."""
+        self._root_layout.removeWidget(self._shared_controls)
+        self._shared_controls.setParent(None)
+        return self._shared_controls
+
+    def _apply_preview_zoom(self, value: str) -> None:
+        """Apply a predictable display scale to both preview panes."""
+        if value == "适应窗口":
+            self.view_input.fit_to_view()
+            self.view_output.fit_to_view()
+            return
+        try:
+            scale = float(value.rstrip("%")) / 100.0
+        except ValueError:
+            return
+        self.view_input.set_zoom(scale)
+        self.view_output.set_zoom(scale)
 
     # ------------------------------------------------------------------
     # 拖拽支持
@@ -735,6 +783,11 @@ class ImageView(QWidget):
         self._scale = 1.0
         self._apply()
 
+    def set_zoom(self, scale: float) -> None:
+        """Set an explicit preview scale, clamped to a usable range."""
+        self._scale = max(0.05, min(20.0, float(scale)))
+        self._apply()
+
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         # 保持响应式:首次获得尺寸时自动适应
@@ -858,7 +911,7 @@ class ScaleWidget(QWidget):
         self.btn_apply.clicked.connect(self._apply_scale_to_size)
         form.addRow("", self.btn_apply)
 
-        body.addWidget(param_box, 0)
+        self._shared_controls = param_box
 
         # 右:双图预览
         preview_wrap = QVBoxLayout()
@@ -894,6 +947,11 @@ class ScaleWidget(QWidget):
         self.spn_w.valueChanged.connect(self._on_w_changed)
         self.spn_h.valueChanged.connect(self._on_h_changed)
         self.dsp_scale.valueChanged.connect(self._on_scale_changed)
+
+    def detach_shared_controls(self) -> QWidget:
+        """Move scaling parameters into the shared tool panel."""
+        self._shared_controls.setParent(None)
+        return self._shared_controls
 
     # ------------------------------------------------------------------
     # 拖拽
@@ -1097,6 +1155,7 @@ class BGRWorker(QThread):
         ch_channel, ch_min, ch_max, ch_invert,
         ch_feather, ch_edge_shrink,
         ai_model, ai_edge_shrink,
+        checker_tile_size, checker_tolerance, checker_anti_alias, checker_binary_alpha,
     ) -> None:
         super().__init__()
         self.mode = mode
@@ -1118,6 +1177,10 @@ class BGRWorker(QThread):
         self.ch_edge_shrink = ch_edge_shrink
         self.ai_model = ai_model
         self.ai_edge_shrink = ai_edge_shrink
+        self.checker_tile_size = checker_tile_size
+        self.checker_tolerance = checker_tolerance
+        self.checker_anti_alias = checker_anti_alias
+        self.checker_binary_alpha = checker_binary_alpha
 
     def run(self) -> None:
         try:
@@ -1167,6 +1230,16 @@ class BGRWorker(QThread):
                 model_path=self.ai_model,
                 edge_shrink=float(self.ai_edge_shrink),
             )
+        elif self.mode == "checkerboard":
+            if remove_fake_checkerboard is None:
+                raise RuntimeError("棋盘格背景模块不可用")
+            return remove_fake_checkerboard(
+                img,
+                tile_size=self.checker_tile_size,
+                tolerance=float(self.checker_tolerance),
+                anti_alias=bool(self.checker_anti_alias),
+                binary_alpha=bool(self.checker_binary_alpha),
+            )
         return None
 
 
@@ -1197,8 +1270,14 @@ class BackgroundRemoverWidget(QWidget):
         self.setAcceptDrops(True)
 
         root = QVBoxLayout(self)
+        self._root_layout = root
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(10)
+
+        self._shared_controls = QWidget()
+        self._shared_controls_layout = QVBoxLayout(self._shared_controls)
+        self._shared_controls_layout.setContentsMargins(0, 0, 0, 0)
+        self._shared_controls_layout.setSpacing(8)
 
         # ---- 顶部控件栏 --------------------------------------------------
         ctrl_row = QHBoxLayout()
@@ -1213,7 +1292,7 @@ class BackgroundRemoverWidget(QWidget):
         ctrl_row.addWidget(self.lbl_file, 1)
 
         ctrl_row.addStretch(1)
-        root.addLayout(ctrl_row)
+        self._shared_controls_layout.addLayout(ctrl_row)
 
         # ---- 模式切换标签 ------------------------------------------------
         mode_bar = QHBoxLayout()
@@ -1222,7 +1301,7 @@ class BackgroundRemoverWidget(QWidget):
 
         self._mode_group = QButtonGroup()
         self._mode_buttons: dict[str, QPushButton] = {}
-        for label, val in [("按颜色", "color"), ("按通道", "channel"), ("AI 智能", "ai")]:
+        for label, val in [("按颜色", "color"), ("按通道", "channel"), ("棋盘格背景", "checkerboard"), ("AI 智能", "ai")]:
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.setFixedWidth(80)
@@ -1231,7 +1310,7 @@ class BackgroundRemoverWidget(QWidget):
             self._mode_buttons[val] = btn
             mode_bar.addWidget(btn)
         mode_bar.addStretch(1)
-        root.addLayout(mode_bar)
+        self._shared_controls_layout.addLayout(mode_bar)
         self._mode_group.buttonClicked.connect(self._on_mode_changed)
         # 默认选中"按颜色"
         self._mode_buttons["color"].setChecked(True)
@@ -1275,7 +1354,7 @@ class BackgroundRemoverWidget(QWidget):
         )
         action_row.addWidget(self.btn_process)
 
-        root.addLayout(action_row)
+        self._shared_controls_layout.addLayout(action_row)
 
         # ---- 左右分栏 ----------------------------------------------------
         body = QHBoxLayout()
@@ -1285,14 +1364,16 @@ class BackgroundRemoverWidget(QWidget):
         self._param_box = QGroupBox("按颜色 — 处理参数")
         self._param_stack = QStackedLayout(self._param_box)
         self._param_stack.setContentsMargins(0, 0, 0, 0)
-        body.addWidget(self._param_box, 0)
+        self._shared_controls_layout.addWidget(self._param_box)
 
         # 创建三个模式页面
         self._page_color = QWidget()
         self._page_channel = QWidget()
+        self._page_checkerboard = QWidget()
         self._page_ai = QWidget()
         self._param_stack.addWidget(self._page_color)
         self._param_stack.addWidget(self._page_channel)
+        self._param_stack.addWidget(self._page_checkerboard)
         self._param_stack.addWidget(self._page_ai)
 
         # --- 右:预览 ---
@@ -1310,7 +1391,13 @@ class BackgroundRemoverWidget(QWidget):
         # ---- 构建各模式参数控件 ----
         self._build_color_controls()
         self._build_channel_controls()
+        self._build_checkerboard_controls()
         self._build_ai_controls()
+
+    def detach_shared_controls(self) -> QWidget:
+        """Move the mode-specific background parameters to the shared panel."""
+        self._shared_controls.setParent(None)
+        return self._shared_controls
 
     # ------------------------------------------------------------------
     # 控件构建 — 按颜色
@@ -1446,6 +1533,50 @@ class BackgroundRemoverWidget(QWidget):
         lay.addRow("边缘收缩 (px)", self._ch_edge_shrink)
         lay.addRow("通道直方图", self._hist_canvas)
 
+    def _build_checkerboard_controls(self) -> None:
+        """构建假棋盘格背景去除参数。"""
+        self._checker_tile_size = QSpinBox()
+        self._checker_tile_size.setRange(0, 512)
+        self._checker_tile_size.setValue(0)
+        self._checker_tile_size.setSpecialValueText("自动检测")
+        self._checker_tile_size.setToolTip("0 表示自动检测棋盘格周期")
+        self._checker_tile_size.valueChanged.connect(self._mark_dirty)
+
+        self._checker_tolerance = QSpinBox()
+        self._checker_tolerance.setRange(1, 100)
+        self._checker_tolerance.setValue(18)
+        self._checker_tolerance.valueChanged.connect(self._mark_dirty)
+
+        self._checker_anti_alias = QCheckBox("保留抗锯齿边缘")
+        self._checker_anti_alias.setChecked(True)
+        self._checker_anti_alias.toggled.connect(self._on_checker_anti_alias_toggled)
+
+        self._checker_binary_alpha = QCheckBox("二值透明（仅 0/255）")
+        self._checker_binary_alpha.setChecked(False)
+        self._checker_binary_alpha.toggled.connect(self._on_checker_binary_toggled)
+
+        lay = QFormLayout(self._page_checkerboard)
+        lay.setContentsMargins(10, 14, 10, 10)
+        lay.setSpacing(8)
+        lay.addRow("棋盘格尺寸", self._checker_tile_size)
+        lay.addRow("颜色容差", self._checker_tolerance)
+        lay.addRow("边缘处理", self._checker_anti_alias)
+        lay.addRow("", self._checker_binary_alpha)
+
+    def _on_checker_anti_alias_toggled(self, checked: bool) -> None:
+        if checked and self._checker_binary_alpha.isChecked():
+            self._checker_binary_alpha.blockSignals(True)
+            self._checker_binary_alpha.setChecked(False)
+            self._checker_binary_alpha.blockSignals(False)
+        self._mark_dirty()
+
+    def _on_checker_binary_toggled(self, checked: bool) -> None:
+        if checked and self._checker_anti_alias.isChecked():
+            self._checker_anti_alias.blockSignals(True)
+            self._checker_anti_alias.setChecked(False)
+            self._checker_anti_alias.blockSignals(False)
+        self._mark_dirty()
+
     # ------------------------------------------------------------------
     # 控件构建 — AI
     # ------------------------------------------------------------------
@@ -1531,11 +1662,12 @@ class BackgroundRemoverWidget(QWidget):
                 return
 
     def _show_mode_controls(self, mode: str) -> None:
-        index_map = {"color": 0, "channel": 1, "ai": 2}
+        index_map = {"color": 0, "channel": 1, "checkerboard": 2, "ai": 3}
         self._param_stack.setCurrentIndex(index_map.get(mode, 0))
         title_map = {
             "color": "按颜色 — 处理参数",
             "channel": "按通道 — 处理参数",
+            "checkerboard": "棋盘格背景 — 处理参数",
             "ai": "AI 智能 — 处理参数",
         }
         self._param_box.setTitle(title_map.get(mode, "参数"))
@@ -1791,6 +1923,17 @@ class BackgroundRemoverWidget(QWidget):
                     model_path=model_path,
                     edge_shrink=float(self._ai_edge_shrink.value()),
                 )
+            elif mode == "checkerboard":
+                if remove_fake_checkerboard is None:
+                    raise RuntimeError("棋盘格背景模块不可用")
+                tile = int(self._checker_tile_size.value()) or None
+                return remove_fake_checkerboard(
+                    img,
+                    tile_size=tile,
+                    tolerance=float(self._checker_tolerance.value()),
+                    anti_alias=self._checker_anti_alias.isChecked(),
+                    binary_alpha=self._checker_binary_alpha.isChecked(),
+                )
         except Exception as exc:
             QMessageBox.warning(self, "处理失败", str(exc))
             return None
@@ -1857,6 +2000,10 @@ class BackgroundRemoverWidget(QWidget):
             ch_edge_shrink=self._ch_edge_shrink.value(),
             ai_model=self._ai_builtin_path if self._ai_mode.currentIndex() == 0 else self._ai_path.text(),
             ai_edge_shrink=self._ai_edge_shrink.value(),
+            checker_tile_size=(int(self._checker_tile_size.value()) or None),
+            checker_tolerance=self._checker_tolerance.value(),
+            checker_anti_alias=self._checker_anti_alias.isChecked(),
+            checker_binary_alpha=self._checker_binary_alpha.isChecked(),
         )
         self._worker.finished.connect(self._on_worker_done)
         self._worker.failed.connect(self._on_worker_failed)
@@ -2005,6 +2152,199 @@ class BackgroundRemoverWidget(QWidget):
 
 
 
+class ResizableSplitter(QSplitter):
+    """QSplitter with an explicit mouse-drag handle implementation."""
+
+    def createHandle(self) -> QSplitterHandle:
+        handle = ResizableSplitterHandle(self.orientation(), self)
+        handle.installEventFilter(self)
+        return handle
+
+    def eventFilter(self, watched, event) -> bool:
+        if not isinstance(watched, ResizableSplitterHandle):
+            return super().eventFilter(watched, event)
+        index = next((i for i in range(1, self.count()) if self.handle(i) == watched), -1)
+        if index < 1:
+            return super().eventFilter(watched, event)
+        if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.LeftButton:
+            watched._drag_start_x = int(event.globalPosition().x())
+            watched._drag_sizes = self.sizes()
+            watched.grabMouse()
+            return True
+        if event.type() == QEvent.Type.MouseMove and watched._drag_start_x is not None:
+            delta = int(event.globalPosition().x()) - watched._drag_start_x
+            left_widget = self.widget(index - 1)
+            right_widget = self.widget(index)
+            sizes = list(watched._drag_sizes)
+            sizes[index - 1] = max(left_widget.minimumWidth(), watched._drag_sizes[index - 1] + delta)
+            sizes[index] = max(right_widget.minimumWidth(), watched._drag_sizes[index] - delta)
+            self.setSizes(sizes)
+            return True
+        if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.LeftButton:
+            watched._drag_start_x = None
+            watched._drag_sizes = []
+            watched.releaseMouse()
+            return True
+        return super().eventFilter(watched, event)
+
+
+class ResizableSplitterHandle(QSplitterHandle):
+    def __init__(self, orientation: Qt.Orientation, parent: ResizableSplitter) -> None:
+        super().__init__(orientation, parent)
+        self.setCursor(Qt.SizeHorCursor)
+        self.setMouseTracking(True)
+        self._drag_start_x: int | None = None
+        self._drag_start_local_x: int | None = None
+        self._drag_sizes: list[int] = []
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            splitter = self.splitter()
+            self._drag_start_x = int(event.globalPosition().x())
+            self._drag_start_local_x = int(event.position().x())
+            self._drag_sizes = splitter.sizes()
+            self.grabMouse()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._drag_start_x is not None:
+            splitter = self.splitter()
+            global_delta = int(event.globalPosition().x()) - self._drag_start_x
+            local_delta = int(event.position().x()) - (self._drag_start_local_x or 0)
+            # Offscreen QtTest events may report a constant global position.
+            delta = global_delta if global_delta else local_delta
+            index = next(
+                (i for i in range(1, splitter.count()) if splitter.handle(i) is self),
+                -1,
+            )
+            if index > 0:
+                left = max(splitter.widget(index - 1).minimumWidth(), self._drag_sizes[index - 1] + delta)
+                right = max(splitter.widget(index).minimumWidth(), self._drag_sizes[index] - delta)
+                sizes = list(self._drag_sizes)
+                sizes[index - 1], sizes[index] = left, right
+                splitter.setSizes(sizes)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton and self._drag_start_x is not None:
+            self._drag_start_x = None
+            self._drag_start_local_x = None
+            self._drag_sizes = []
+            self.releaseMouse()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
+class ToolActionPanel(QGroupBox):
+    """Shared actions for the currently selected tool page.
+
+    Individual pages keep their specialized parameters, while common file and
+    execution actions are exposed consistently in this panel.
+    """
+
+    def __init__(self, tabs: QTabWidget, parent: QWidget | None = None) -> None:
+        super().__init__("当前工具", parent)
+        self._tabs = tabs
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 12, 8, 8)
+        layout.setSpacing(6)
+        self.tool_label = QLabel()
+        self.tool_label.setWordWrap(True)
+        self.tool_label.setStyleSheet("font-weight: bold;")
+        layout.addWidget(self.tool_label)
+        self.open_button = QPushButton("打开图片")
+        self.open_button.clicked.connect(lambda: self._call("on_open"))
+        layout.addWidget(self.open_button)
+        self.run_button = QPushButton("执行")
+        self.run_button.setDefault(True)
+        self.run_button.clicked.connect(lambda: self._call("on_run"))
+        layout.addWidget(self.run_button)
+        self.save_button = QPushButton("保存结果")
+        self.save_button.clicked.connect(lambda: self._call("on_save"))
+        layout.addWidget(self.save_button)
+        self.push_button = QPushButton("加入缓存区")
+        self.push_button.clicked.connect(self._push_current_output)
+        layout.addWidget(self.push_button)
+        self.reset_button = QPushButton("重置")
+        self.reset_button.clicked.connect(self._reset_current)
+        layout.addWidget(self.reset_button)
+        self._control_host = QVBoxLayout()
+        self._control_host.setContentsMargins(0, 8, 0, 0)
+        layout.addLayout(self._control_host)
+        layout.addStretch(1)
+        tabs.currentChanged.connect(self.refresh)
+        self.refresh(tabs.currentIndex())
+
+    def _widget(self) -> QWidget | None:
+        return self._tabs.currentWidget()
+
+    def _call(self, method: str) -> None:
+        widget = self._widget()
+        callback = getattr(widget, method, None) if widget is not None else None
+        if not callable(callback) and method == "on_run":
+            for name in ("_apply_scale_to_size", "_refresh_preview", "on_process", "_on_process"):
+                candidate = getattr(widget, name, None) if widget is not None else None
+                if callable(candidate):
+                    callback = candidate
+                    break
+        if not callable(callback) and method == "on_save":
+            callback = (lambda: widget._on_save("png")) if widget is not None and callable(getattr(widget, "_on_save", None)) else None
+        if callable(callback):
+            callback()
+
+    def _push_current_output(self) -> None:
+        widget = self._widget()
+        if widget is None:
+            return
+        image = getattr(widget, "output_image", None)
+        if image is None:
+            image = getattr(widget, "result_image", None)
+        if isinstance(image, np.ndarray):
+            image_buffer().push(image, source_tab=self.tool_label.text())
+
+    def _reset_current(self) -> None:
+        widget = self._widget()
+        if widget is None:
+            return
+        for name in ("reset", "clear", "reset_view"):
+            callback = getattr(widget, name, None)
+            if callable(callback):
+                callback()
+                return
+
+    def refresh(self, index: int) -> None:
+        title = self._tabs.tabText(index) if index >= 0 else "当前工具"
+        self.tool_label.setText(title)
+        widget = self._widget()
+        while self._control_host.count():
+            item = self._control_host.takeAt(0)
+            if item.widget() is not None:
+                item.widget().setParent(None)
+        controls = None
+        detach = getattr(widget, "detach_shared_controls", None) if widget is not None else None
+        if callable(detach):
+            controls = detach()
+        if controls is not None:
+            self._control_host.addWidget(controls)
+        self.open_button.setEnabled(callable(getattr(widget, "on_open", None)))
+        self.run_button.setEnabled(callable(getattr(widget, "on_run", None)) or callable(getattr(widget, "_apply_scale_to_size", None)))
+        self.save_button.setEnabled(callable(getattr(widget, "on_save", None)) or callable(getattr(widget, "_on_save", None)))
+        has_embedded_controls = controls is not None
+        self.open_button.setVisible(not has_embedded_controls)
+        self.run_button.setVisible(not has_embedded_controls)
+        self.save_button.setVisible(not has_embedded_controls)
+        self.push_button.setEnabled(
+            isinstance(getattr(widget, "output_image", None), np.ndarray)
+            or isinstance(getattr(widget, "result_image", None), np.ndarray)
+        )
+        self.reset_button.setEnabled(any(callable(getattr(widget, name, None)) for name in ("reset", "clear", "reset_view")))
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -2020,6 +2360,7 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.setTabPosition(QTabWidget.North)
         self.tabs.setMovable(False)
+        self.tabs.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
 
         # ------- 第一个工具 -------
         self.pixel_tab = PixelRefineWidget()
@@ -2078,14 +2419,71 @@ class MainWindow(QMainWindow):
         self.sequence_tab = SequencePreviewWidget()
         self.tabs.addTab(self.sequence_tab, "🎞️ 序列帧预览")
 
-        root.addWidget(self.tabs, 1)
+        self.workspace_splitter = ResizableSplitter(Qt.Horizontal, central)
+        workspace_splitter = self.workspace_splitter
+        workspace_splitter.setChildrenCollapsible(False)
+        workspace_splitter.setHandleWidth(14)
+        workspace_splitter.setOpaqueResize(True)
+        workspace_splitter.setMouseTracking(True)
+        workspace_splitter.setStyleSheet(
+            "QSplitter::handle { background: #b8bec7; margin: 0px 3px; }"
+            "QSplitter::handle:hover { background: #4d90fe; }"
+            "QSplitter::handle:pressed { background: #1769d1; }"
+        )
+        workspace_splitter.addWidget(self.tabs)
+
+        # ------- 统一工具操作区 -------
+        self.tool_actions = ToolActionPanel(self.tabs)
+        self.tool_actions.setMinimumWidth(110)
+        workspace_splitter.addWidget(self.tool_actions)
 
         # ------- 右侧暂存区 -------
         self.tray = ImageTrayWidget(image_buffer())
         self.tray.load_request.connect(self._on_tray_load_request)
-        root.addWidget(self.tray)
+        workspace_splitter.addWidget(self.tray)
+        workspace_splitter.setStretchFactor(0, 1)
+        workspace_splitter.setStretchFactor(1, 1)
+        workspace_splitter.setStretchFactor(2, 1)
+        for handle_index in (1, 2):
+            handle = workspace_splitter.handle(handle_index)
+            handle.setEnabled(True)
+            handle.setMouseTracking(True)
+            handle.setCursor(Qt.SizeHorCursor)
+        root.addWidget(workspace_splitter, 1)
+        QTimer.singleShot(0, lambda: workspace_splitter.setSizes([900, 260, 260]))
 
         self.setCentralWidget(central)
+        central.setMinimumSize(0, 0)
+        self.tabs.setMinimumSize(0, 0)
+        for page_index in range(self.tabs.count()):
+            page = self.tabs.widget(page_index)
+            if page is not None:
+                page.setMinimumSize(0, 0)
+                page.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+
+        # ------- 底部项目资产栏 -------
+        self.asset_dock = QDockWidget("项目资产", self)
+        self.asset_dock.setAllowedAreas(Qt.BottomDockWidgetArea)
+        self.asset_dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
+        self.asset_dock.setMinimumHeight(170)
+        asset_view = QTreeView(self.asset_dock)
+        asset_view.setHeaderHidden(False)
+        asset_view.setAlternatingRowColors(True)
+        asset_view.setSelectionMode(QTreeView.SingleSelection)
+        asset_model = QFileSystemModel(asset_view)
+        project_root = str(Path(__file__).resolve().parent)
+        asset_model.setRootPath(project_root)
+        asset_model.setNameFilterDisables(False)
+        asset_model.setNameFilters(["*.png", "*.jpg", "*.jpeg", "*.bmp", "*.webp", "*.gif"])
+        asset_view.setModel(asset_model)
+        asset_view.setRootIndex(asset_model.index(project_root))
+        asset_view.doubleClicked.connect(lambda index: self._open_asset(asset_model.filePath(index)))
+        self.asset_dock.setWidget(asset_view)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.asset_dock)
+        self.asset_dock.hide()
+        self._asset_toggle = QShortcut(QKeySequence("Space"), self)
+        self._asset_toggle.setContext(Qt.WindowShortcut)
+        self._asset_toggle.activated.connect(self._toggle_assets)
 
         # ------- 工具栏 -------
         toolbar = QToolBar("主工具栏")
@@ -2106,10 +2504,32 @@ class MainWindow(QMainWindow):
         self.setStatusBar(QStatusBar(self))
         self.statusBar().showMessage("就绪 — 拖拽图片到窗口,或点击「打开图片」")
 
+        # Keep the initial window within the physical screen.  Child pages
+        # are explicitly shrinkable so their preferred layouts cannot force a
+        # desktop-wide window on smaller displays or high-DPI systems.
+        self.setMinimumSize(900, 560)
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            self.resize(min(1280, available.width()), min(720, available.height()))
+
         QShortcut(QKeySequence("Ctrl+Q"), self, self.close)
 
     def register_tab(self, widget: QWidget, title: str) -> None:
         self.tabs.insertTab(self.tabs.count() - 1, widget, title)
+
+    def _toggle_assets(self) -> None:
+        self.asset_dock.setVisible(not self.asset_dock.isVisible())
+
+    def _open_asset(self, path: str) -> None:
+        if not Path(path).is_file():
+            return
+        widget = self._current_widget()
+        loader = getattr(widget, "load_path", None) if widget is not None else None
+        if not callable(loader):
+            loader = getattr(widget, "on_open_path", None) if widget is not None else None
+        if callable(loader):
+            loader(path)
 
     # ------------------------------------------------------------------
     # 暂存区双击 → 把图片送入当前 Tab
@@ -2148,6 +2568,14 @@ class MainWindow(QMainWindow):
 # ---------------------------------------------------------------------------
 
 def main() -> int:
+    # Prevent duplicate Qt processes when MCP or a launcher is invoked again.
+    # Keeping the mutex handle alive for the process lifetime is intentional.
+    global _single_instance_mutex
+    _single_instance_mutex = ctypes.windll.kernel32.CreateMutexW(
+        None, False, "PerfectPixelTool.Desktop.Singleton"
+    )
+    if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        return 0
     app = QApplication(sys.argv)
     app.setApplicationName("PerfectPixelTool")
     app.setOrganizationName("PerfectPixelTool")
@@ -2200,7 +2628,6 @@ def main() -> int:
 
     # --- Win32 API: 强制刷新窗口图标句柄（解决标题栏/任务栏绿块） ---
     if sys.platform == "win32":
-        import ctypes
         try:
             user32 = ctypes.windll.user32
             SendMessageW = user32.SendMessageW

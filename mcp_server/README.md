@@ -19,9 +19,12 @@ Exposed tools:
 - `refine_pixel_art`
 - `resize_image`
 - `remove_image_background`
+- `launch_desktop_app`
+- `check_splitter_drag`
 - `check_desktop_startup`
 - `inspect_image`
 - `check_project_health`
+- `remove_fake_checkerboard`
 
 This is a stdio server: it waits for JSON-RPC input, has no browser page, and is
 normally started and stopped by an MCP client. A blank terminal is expected.

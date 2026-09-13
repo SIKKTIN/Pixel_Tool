@@ -6,6 +6,7 @@ Perfect Pixel Tool 是一个面向像素风素材的本地图像工具集，组�
 
 - 自动检测并规整像素网格（OpenCV / NumPy 后端）
 - 保留 PNG 的 RGBA 和半透明边缘
+- 自动检测并去除写入 RGB 的假棋盘格背景
 - 最近邻缩放、去水印、去背景、手动编辑
 - 矩形裁切和自由轮廓裁切，裁切外区域保持透明
 - 序列帧预览、播放/暂停、FPS 调整和逐帧查看
@@ -68,9 +69,11 @@ MCP 服务位于 `mcp_server/server.py`，采用 stdio JSON-RPC；stdout 只用�
 | `refine_pixel_art` | 自动检测网格并细化像素图 |
 | `resize_image` | 最近邻缩放 |
 | `remove_image_background` | 颜色/通道/可选 AI 去背景 |
+| `launch_desktop_app` | 启动本地 PySide6 桌面窗口，重复调用不会重复启动 |
 | `check_desktop_startup` | offscreen 创建 `QApplication` 和 `MainWindow`，捕获启动异常 |
 | `inspect_image` | 检查图片模式、尺寸和 Alpha 统计 |
 | `check_project_health` | 编译 Python 文件并检查核心模块导入 |
+| `remove_fake_checkerboard` | 检测并去除白灰棋盘格，输出 RGBA PNG |
 
 客户端配置：
 
@@ -122,3 +125,5 @@ MCP 服务位于 `mcp_server/server.py`，采用 stdio JSON-RPC；stdout 只用�
 ## 许可证
 
 项目沿用 MIT 许可证；第三方模型和依赖请遵循各自许可证。
+
+桌面主窗口保留顶部模块 Tab，并提供统一的当前工具操作区、右侧缓存区和可用空格键切换的底部项目资产栏。资产栏以项目目录为根，图片可双击载入当前模块。

@@ -21,12 +21,14 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(_ROOT / "src"))
 
-from perfect_pixel import get_perfect_pixel
+from perfect_pixel import get_perfect_pixel, remove_fake_checkerboard as _remove_fake_checkerboard
 from perfect_pixel.background_remover import remove_background
 from perfect_pixel.app_core.image_io import load_rgb, save_png
+from perfect_pixel.app_core.image_io import load_rgba
 
 mcp = FastMCP("PerfectPixelTool")
 OUTPUT_DIR = Path("mcp_outputs")
+_desktop_process: subprocess.Popen[bytes] | None = None
 
 
 def _load(path: str) -> np.ndarray:
@@ -97,6 +99,71 @@ def remove_image_background(
 
 
 @mcp.tool()
+def remove_fake_checkerboard(
+    input_path: str,
+    tile_size: int | None = None,
+    tolerance: float = 18.0,
+    anti_alias: bool = True,
+    binary_alpha: bool = False,
+) -> dict[str, Any]:
+    """Remove a baked white/gray checkerboard and export an RGBA PNG."""
+    if tile_size is not None and tile_size < 1:
+        raise ValueError("tile_size must be positive or null")
+    if tolerance < 0 or tolerance > 100:
+        raise ValueError("tolerance must be between 0 and 100")
+    p = Path(input_path).expanduser().resolve()
+    if not p.is_file():
+        raise FileNotFoundError(f"Image not found: {p}")
+    image = load_rgba(p)
+    result = _remove_fake_checkerboard(
+        image, tile_size=tile_size, tolerance=float(tolerance),
+        anti_alias=bool(anti_alias), binary_alpha=bool(binary_alpha),
+    )
+    output = _save(result, "checkerboard")
+    alpha = result[..., 3]
+    return {
+        "output_path": str(output), "width": int(result.shape[1]),
+        "height": int(result.shape[0]), "mode": "RGBA",
+        "transparent_pixels": int(np.count_nonzero(alpha == 0)),
+        "partial_alpha_pixels": int(np.count_nonzero((alpha > 0) & (alpha < 255))),
+    }
+
+
+@mcp.tool()
+def launch_desktop_app() -> dict[str, Any]:
+    """Launch the Perfect Pixel Tool desktop window and return its process id.
+
+    The MCP server remains responsive because the GUI is started as a detached
+    child process. Calling this tool again while that child is alive is a no-op.
+    """
+    global _desktop_process
+    if _desktop_process is not None and _desktop_process.poll() is None:
+        return {"ok": True, "already_running": True, "pid": _desktop_process.pid}
+    python_exe = _ROOT / ".venv" / "Scripts" / "pythonw.exe"
+    if not python_exe.is_file():
+        python_exe = _ROOT / ".venv" / "Scripts" / "python.exe"
+    if not python_exe.is_file():
+        python_exe = Path(sys.executable).resolve()
+    app_script = _ROOT / "desktop_app.py"
+    if not app_script.is_file():
+        raise FileNotFoundError(f"Desktop entry point not found: {app_script}")
+    env = os.environ.copy()
+    env.pop("QT_QPA_PLATFORM", None)
+    env["PYTHONPATH"] = os.pathsep.join([str(_ROOT), str(_ROOT / "src"), env.get("PYTHONPATH", "")])
+    # A detached process with no console can suppress Qt's top-level window on
+    # some Windows builds. A new process group is sufficient; stdio is already
+    # redirected below so the MCP server remains independent.
+    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    _desktop_process = subprocess.Popen(
+        [str(python_exe), str(app_script)], cwd=_ROOT, env=env,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, creationflags=creationflags,
+    )
+    return {"ok": True, "already_running": False, "pid": _desktop_process.pid,
+            "executable": str(python_exe), "entry_point": str(app_script)}
+
+
+@mcp.tool()
 def check_desktop_startup(timeout_seconds: int = 120) -> dict[str, Any]:
     """Start the PySide6 desktop app headlessly and verify MainWindow creation.
 
@@ -128,6 +195,51 @@ def check_desktop_startup(timeout_seconds: int = 120) -> dict[str, Any]:
         "stdout": proc.stdout[-4000:],
         "stderr": proc.stderr[-8000:],
     }
+
+
+@mcp.tool()
+def check_splitter_drag() -> dict[str, Any]:
+    """Use QtTest to verify both workspace splitter handles resize panels."""
+    code = '''
+import json, os
+from PySide6.QtCore import QPointF, Qt, QCoreApplication, QEvent
+from PySide6.QtGui import QMouseEvent
+from PySide6.QtWidgets import QApplication
+from desktop_app import MainWindow
+app = QApplication([])
+window = MainWindow(); window.show(); app.processEvents()
+splitter = window.workspace_splitter
+checks = []
+for handle_index in (1, 2):
+    handle = splitter.handle(handle_index)
+    before = splitter.sizes()
+    point = handle.rect().center()
+    def send(kind, x):
+        event = QMouseEvent(kind, QPointF(x, point.y()), QPointF(x, point.y()),
+                            Qt.LeftButton, Qt.LeftButton if kind != QEvent.Type.MouseButtonRelease else Qt.NoButton,
+                            Qt.NoModifier)
+        QCoreApplication.sendEvent(handle, event)
+    send(QEvent.Type.MouseButtonPress, point.x())
+    send(QEvent.Type.MouseMove, point.x() + 80)
+    send(QEvent.Type.MouseButtonRelease, point.x() + 80)
+    app.processEvents()
+    after = splitter.sizes()
+    checks.append({"handle": handle_index, "before": before, "after": after,
+                   "changed": before != after})
+print(json.dumps({"checks": checks}), flush=True)
+os._exit(0)
+'''
+    env = os.environ.copy()
+    env["QT_QPA_PLATFORM"] = "offscreen"
+    env["PYTHONPATH"] = os.pathsep.join([str(_ROOT), str(_ROOT / "src"), env.get("PYTHONPATH", "")])
+    proc = subprocess.run([sys.executable, "-c", code], cwd=_ROOT, env=env,
+                          capture_output=True, text=True, timeout=60)
+    try:
+        result = __import__("json").loads(proc.stdout.strip().splitlines()[-1])
+    except Exception:
+        return {"ok": False, "stdout": proc.stdout[-2000:], "stderr": proc.stderr[-4000:]}
+    result["ok"] = proc.returncode == 0 and all(item["changed"] for item in result["checks"])
+    return result
 
 
 @mcp.tool()
