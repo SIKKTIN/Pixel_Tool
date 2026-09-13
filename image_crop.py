@@ -432,6 +432,10 @@ class CropView(QGraphicsView):
                 painter.setPen(QPen(QColor(255, 255, 255), 1)); painter.setBrush(QBrush(QColor(255, 190, 40)))
                 for point in pts: painter.drawEllipse(point, 4, 4)
             painter.end()
+            # The normal rectangle dimming layer below would cover the
+            # lasso overlay. Keep the freeform guide as the topmost layer.
+            if self._free_drawing or len(self._free_polygon) >= 3:
+                return
         if self._crop_box is None or self._image_size == (0, 0) or self._pix_item is None:
             return
 
