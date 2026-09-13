@@ -380,6 +380,39 @@ def get_perfect_pixel(image, sample_method="center", grid_size = None, min_size 
     returns: 
         refined_w, refined_h, scaled_image
     """
+    # RGBA must be handled explicitly.  The grid detector is an RGB algorithm;
+    # feeding alpha as a fourth colour channel makes transparent pixels (whose
+    # hidden RGB values are often black) contaminate the sampled background.
+    if image.ndim == 3 and image.shape[2] == 4:
+        rgb = np.ascontiguousarray(image[..., :3])
+        alpha = np.ascontiguousarray(image[..., 3])
+        # Premultiplied-alpha colour prevents hidden RGB values in transparent
+        # pixels (often white/checkerboard) from becoming visible halos.
+        rgb_premul = np.rint(rgb.astype(np.float32) * (alpha[..., None].astype(np.float32) / 255.0)).astype(np.uint8)
+        refined_w, refined_h, refined_rgb = get_perfect_pixel(
+            rgb_premul, sample_method=sample_method, grid_size=grid_size,
+            min_size=min_size, peak_width=peak_width,
+            refine_intensity=refine_intensity, fix_square=fix_square,
+            debug=debug,
+        )
+        if refined_rgb is None:
+            return refined_w, refined_h, refined_rgb
+        # Alpha follows the final pixel grid.  Area sampling preserves useful
+        # anti-aliased edges; fully transparent pixels get neutral RGB below.
+        out_h, out_w = refined_rgb.shape[:2]
+        alpha_out = cv2.resize(alpha, (out_w, out_h), interpolation=cv2.INTER_AREA)
+        result = np.empty((out_h, out_w, 4), dtype=np.uint8)
+        alpha_out = np.clip(alpha_out, 0, 255).astype(np.uint8)
+        premul_out = np.asarray(refined_rgb, dtype=np.float32)
+        result[..., :3] = np.where(
+            alpha_out[..., None] > 0,
+            np.clip(premul_out * 255.0 / np.maximum(alpha_out[..., None], 1), 0, 255),
+            0,
+        ).astype(np.uint8)
+        result[..., 3] = alpha_out
+        result[result[..., 3] == 0, :3] = 0
+        return refined_w, refined_h, result
+
     H, W = image.shape[:2]
     if grid_size is not None:
         # use provided grid size

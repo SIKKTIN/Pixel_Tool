@@ -14,7 +14,7 @@ from typing import Optional
 import numpy as np
 
 from PySide6.QtCore import Qt, QPointF, QRect, QRectF, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap
+from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QGraphicsItem,
     QGraphicsItemGroup,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMessageBox,
     QPushButton,
@@ -35,7 +36,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from PIL import Image
+from PIL import Image, ImageDraw
 from PIL.ImageQt import ImageQt
 
 from desktop_app import ImageBuffer
@@ -241,6 +242,7 @@ class CropView(QGraphicsView):
     """显示原图 + 可视化裁剪选区。"""
 
     selection_changed = Signal(QRect)
+    freeform_changed = Signal()
 
     DRAG_NONE   = 0
     DRAG_MOVE   = 1
@@ -249,6 +251,7 @@ class CropView(QGraphicsView):
     # 编辑模式
     MODE_RESIZE = "resize"  # 调整大小（默认）：手柄拖拽 + 空白拉框
     MODE_MOVE   = "move"    # 移动位置：只整体平移，禁用手柄和拉框
+    MODE_FREEFORM = "freeform"  # 自由轮廓（鼠标拖拽绘制多边形）
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -275,6 +278,8 @@ class CropView(QGraphicsView):
         self._max_zoom = 32.0
         self._image_size = (0, 0)
         self._mode = self.MODE_RESIZE
+        self._free_polygon: list[QPointF] = []
+        self._free_drawing = False
 
         # 拖拽状态
         self._drag_mode = self.DRAG_NONE
@@ -295,6 +300,8 @@ class CropView(QGraphicsView):
 
         h, w = arr.shape[:2]
         self._image_size = (w, h)
+        self._free_polygon = []
+        self._free_drawing = False
 
         pix = pil_to_qpixmap(np_to_pil(arr))
         self._pix_item = QGraphicsPixmapItem(pix)
@@ -356,7 +363,7 @@ class CropView(QGraphicsView):
 
     def set_mode(self, mode: str) -> None:
         """切换编辑模式：MODE_RESIZE / MODE_MOVE."""
-        if mode not in (self.MODE_RESIZE, self.MODE_MOVE):
+        if mode not in (self.MODE_RESIZE, self.MODE_MOVE, self.MODE_FREEFORM):
             return
         self._mode = mode
         if self._crop_box is not None:
@@ -365,6 +372,25 @@ class CropView(QGraphicsView):
 
     def selection_rect(self) -> QRect:
         return self._sel_rect.toRect()
+
+    def free_polygon(self) -> list[QPointF]:
+        """Return a copy of the current freeform polygon."""
+        return list(self._free_polygon)
+
+    def finish_freeform(self) -> None:
+        """Close the in-progress lasso even if the pointer left the view."""
+        if not self._free_drawing and len(self._free_polygon) < 3:
+            return
+        self._free_drawing = False
+        self._drag_mode = self.DRAG_NONE
+        if len(self._free_polygon) >= 3:
+            xs = [p.x() for p in self._free_polygon]
+            ys = [p.y() for p in self._free_polygon]
+            self._sel_rect = QRectF(min(xs), min(ys), max(xs)-min(xs), max(ys)-min(ys))
+            self.freeform_changed.emit()
+            self.selection_changed.emit(self._sel_rect.toRect())
+        self.setCursor(Qt.ArrowCursor)
+        self.viewport().update()
 
     def fit_to_view(self) -> None:
         if self._image_size == (0, 0):
@@ -383,6 +409,19 @@ class CropView(QGraphicsView):
         - 不管缩放比例如何都自然跟随
         """
         super().paintEvent(event)
+        if len(self._free_polygon) >= 2:
+            painter = QPainter(self.viewport())
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            pen = QPen(QColor(255, 190, 40), 2); pen.setCosmetic(True)
+            painter.setPen(pen)
+            pts = [self.mapFromScene(p) for p in self._free_polygon]
+            if len(pts) >= 3:
+                painter.setBrush(QBrush(QColor(80, 220, 140, 55)))
+                painter.drawPolygon(QPolygonF([QPointF(p) for p in pts]))
+                painter.setBrush(Qt.NoBrush)
+            for a, b in zip(pts, pts[1:]): painter.drawLine(a, b)
+            if not self._free_drawing and len(pts) > 2: painter.drawLine(pts[-1], pts[0])
+            painter.end()
         if self._crop_box is None or self._image_size == (0, 0) or self._pix_item is None:
             return
 
@@ -493,6 +532,25 @@ class CropView(QGraphicsView):
         scene_pt = self.mapToScene(event.pos())
         img_pt = self._map_to_image(scene_pt)
 
+        if self._mode == self.MODE_FREEFORM or event.modifiers() & Qt.AltModifier:
+            self._free_polygon = [img_pt]
+            self._free_drawing = True
+            self._drag_mode = self.DRAG_HANDLE
+            self.setCursor(Qt.CrossCursor)
+            self.viewport().update(); event.accept(); return
+        self._free_polygon = []
+
+        # Ctrl + drag always starts a brand-new free rectangular selection,
+        # even when the current selection already covers the whole image.
+        if self._mode == self.MODE_RESIZE and event.modifiers() & Qt.ControlModifier:
+            self._drag_mode = self.DRAG_HANDLE
+            self._drag_handle = "se"
+            self._drag_start = img_pt
+            self._drag_rect_start = QRectF(img_pt, img_pt)
+            self.setCursor(Qt.CrossCursor)
+            event.accept()
+            return
+
         # 移动模式：禁用手柄拖拽和空白拉框，只能整体平移选区
         if self._mode == self.MODE_MOVE:
             # 整框（含边框）热区：即便鼠标落在边框/手柄附近也能拖
@@ -551,6 +609,13 @@ class CropView(QGraphicsView):
 
         scene_pt = self.mapToScene(event.pos())
         img_pt = self._map_to_image(scene_pt)
+        if self._free_drawing:
+            iw, ih = self._image_size
+            self._free_polygon.append(QPointF(max(0, min(iw, img_pt.x())), max(0, min(ih, img_pt.y()))))
+            xs = [p.x() for p in self._free_polygon]; ys = [p.y() for p in self._free_polygon]
+            self._sel_rect = QRectF(min(xs), min(ys), max(xs)-min(xs), max(ys)-min(ys))
+            self.freeform_changed.emit()
+            self.viewport().update(); event.accept(); return
         dx = img_pt.x() - self._drag_start.x()
         dy = img_pt.y() - self._drag_start.y()
         iw, ih = self._image_size
@@ -591,6 +656,8 @@ class CropView(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        if self._free_drawing:
+            self.finish_freeform(); event.accept(); return
         if self._drag_mode != self.DRAG_NONE:
             self.selection_changed.emit(self._sel_rect.toRect())
         self._drag_mode = self.DRAG_NONE
@@ -740,16 +807,18 @@ class ImageCropWidget(QWidget):
              "调整大小：可拖拽 8 个手柄或在空白处拉出新框"),
             ("移动", CropView.MODE_MOVE,
              "移动位置：只整体平移，禁用手柄和拉框"),
+            ("自由形状", CropView.MODE_FREEFORM,
+             "自由形状：直接拖拽绘制轮廓，轮廓外自动透明"),
         ]):
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.setChecked(idx == 0)
             btn.setToolTip(tip)
+            btn.mode_value = mode
             self._mode_group.addButton(btn, idx)
             mode_layout.addWidget(btn)
         self._mode_group.idClicked.connect(self._on_mode_changed)
         tb.addLayout(mode_layout)
-
         tb.addSpacing(16)
         tb.addWidget(QLabel("W:"))
         self.spin_tw = QSpinBox()
@@ -799,13 +868,20 @@ class ImageCropWidget(QWidget):
 
         src_wrap = QVBoxLayout()
         src_wrap.setSpacing(4)
-        hdr = QLabel("原图（拖拽选区或手柄调整）")
+        hdr = QLabel("原图（矩形模式拖拽框选；自由形状模式直接拖拽轮廓）")
         hdr.setStyleSheet("font-weight: bold; font-size: 13px;")
         src_wrap.addWidget(hdr)
         self.crop_view = CropView()
+        self.btn_finish_free = QPushButton("完成自由裁切")
+        self.btn_finish_free.setToolTip("自由形状模式下，鼠标离开图片后点击此处闭合轮廓")
+        self.btn_finish_free.setEnabled(False)
+        self.btn_finish_free.clicked.connect(self.crop_view.finish_freeform)
+        # Put the action beside the image controls after the view exists.
+        tb.insertWidget(0, self.btn_finish_free)
         self.crop_view.selection_changed.connect(self._on_selection_changed)
         # 每次选区变化（拖动/手柄）实时刷新预览
         self.crop_view.selection_changed.connect(lambda _: self._update_preview())
+        self.crop_view.freeform_changed.connect(self._update_preview)
         src_wrap.addWidget(self.crop_view, 1)
         self.lbl_info = QLabel("尚未载入图片")
         self.lbl_info.setStyleSheet("color: #888; font-size: 11px;")
@@ -879,7 +955,10 @@ class ImageCropWidget(QWidget):
         if not path:
             return
         try:
-            arr = imageio.imread(path)
+            # Use Pillow here; imageio was never imported and made every
+            # file-open attempt fail with ``name 'imageio' is not defined``.
+            with Image.open(path) as pil:
+                arr = np.array(pil.convert("RGBA"), dtype=np.uint8)
         except Exception as exc:
             QMessageBox.critical(self, "打开失败", f"无法读取图片：\n{exc}")
             return
@@ -938,6 +1017,7 @@ class ImageCropWidget(QWidget):
             return
         mode = getattr(btn, "mode_value", CropView.MODE_RESIZE)
         self.crop_view.set_mode(mode)
+        self.btn_finish_free.setEnabled(mode == CropView.MODE_FREEFORM)
 
     def _on_selection_changed(self, rect: QRect) -> None:
         """选区被拖动/手柄调整后实时刷新 W/H 显示。"""
@@ -1023,7 +1103,7 @@ class ImageCropWidget(QWidget):
             return
 
         x, y, w, h = sel.x(), sel.y(), sel.width(), sel.height()
-        cropped = self._source[y : y + h, x : x + w].copy()
+        cropped = self._masked_crop(x, y, w, h)
         out_w, out_h = w, h
 
         self._result = np.ascontiguousarray(cropped, dtype=np.uint8)
@@ -1048,7 +1128,7 @@ class ImageCropWidget(QWidget):
             return
         w = min(w, self._src_w - x)
         h = min(h, self._src_h - y)
-        cropped = self._source[y : y + h, x : x + w].copy()
+        cropped = self._masked_crop(x, y, w, h)
         out_w, out_h = w, h
         self._result = np.ascontiguousarray(cropped, dtype=np.uint8)
         self.preview_view.load(self._result)
@@ -1057,6 +1137,26 @@ class ImageCropWidget(QWidget):
         self.btn_export.setEnabled(True)
         self.btn_to_buf.setEnabled(True)
         self.lbl_status.setText(f"裁剪完成：({x},{y}) {w}×{h} → {size_text}")
+
+    def _masked_crop(self, x: int, y: int, w: int, h: int) -> np.ndarray:
+        """Return the crop; an Alt-drawn polygon makes outside pixels transparent."""
+        cropped = self._source[y:y+h, x:x+w].copy()
+        poly = self.crop_view.free_polygon()
+        if len(poly) < 3:
+            return cropped
+        local = [(int(round(p.x()-x)), int(round(p.y()-y))) for p in poly]
+        mask = Image.new("L", (w, h), 0)
+        ImageDraw.Draw(mask).polygon(local, fill=255)
+        m = np.asarray(mask, dtype=np.uint8)
+        if cropped.ndim == 2:
+            cropped = np.dstack([cropped, cropped, cropped, m])
+        elif cropped.shape[2] == 3:
+            cropped = np.dstack([cropped, m])
+        else:
+            cropped = np.array(cropped, copy=True)
+            cropped[..., 3] = ((cropped[..., 3].astype(np.uint16) * m.astype(np.uint16)) // 255).astype(np.uint8)
+        cropped[m == 0, :3] = 0
+        return cropped
 
     # ------------------------------------------------------------------
     # 导出

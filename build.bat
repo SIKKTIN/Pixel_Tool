@@ -95,6 +95,7 @@ python -m PyInstaller ^
     --hidden-import=onnxruntime ^
     --hidden-import=PIL ^
     --hidden-import=PIL.Image ^
+    --hidden-import=sequence_preview ^
     desktop_app.py
 
 if errorlevel 1 goto :err_pyinstaller

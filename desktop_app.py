@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 import sys
-import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -51,91 +50,12 @@ from PySide6.QtWidgets import (
     QStackedLayout,
 )
 
+_PROJECT_ROOT = Path(__file__).resolve().parent
+_SRC_DIR = _PROJECT_ROOT / "src"
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
 
-# ============================================================
-# 图片暂存区（中央管理器）
-# ============================================================
-
-class ImageBuffer(QObject):
-    """全局图片暂存管理器，供所有 Tab 共享。
-
-    存储每个暂存项的：ID、numpy 数组、来源 Tab、创建时间、来源文件名。
-    右侧面板监听此对象的变化来更新缩略图。
-    """
-
-    changed = Signal()
-
-    def __init__(self, max_items: int = 20):
-        super().__init__()
-        self._items: list[dict] = []
-        self._max_items = max_items
-        self._active_id: Optional[str] = None
-
-    def push(self, image: np.ndarray, source_tab: str = "", source_file: str = "") -> str:
-        """把一张图片压入暂存区，返回新项 ID。"""
-        item_id = uuid.uuid4().hex[:8]
-        h, w = image.shape[:2]
-        self._items.append({
-            "id": item_id,
-            "image": image,
-            "source_tab": source_tab,
-            "source_file": source_file,
-            "size_text": f"{w} × {h}",
-            "created_at": len(self._items) + 1,
-        })
-        if len(self._items) > self._max_items:
-            self._items.pop(0)
-        self._active_id = item_id
-        self.changed.emit()
-        return item_id
-
-    def set_active(self, item_id: str) -> None:
-        """把指定项设为当前选中。"""
-        if any(it["id"] == item_id for it in self._items):
-            self._active_id = item_id
-            self.changed.emit()
-
-    def get_active(self) -> Optional[np.ndarray]:
-        """获取当前选中的图片数组，没有则返回 None。"""
-        for it in self._items:
-            if it["id"] == self._active_id:
-                return it["image"]
-        return None
-
-    def get_by_id(self, item_id: str) -> Optional[np.ndarray]:
-        for it in self._items:
-            if it["id"] == item_id:
-                return it["image"]
-        return None
-
-    def remove(self, item_id: str) -> None:
-        self._items = [it for it in self._items if it["id"] != item_id]
-        if self._active_id == item_id:
-            self._active_id = self._items[-1]["id"] if self._items else None
-        self.changed.emit()
-
-    def clear(self) -> None:
-        self._items.clear()
-        self._active_id = None
-        self.changed.emit()
-
-    def items(self) -> list[dict]:
-        return list(self._items)
-
-    @property
-    def active_id(self) -> Optional[str]:
-        return self._active_id
-
-
-# 全局唯一实例
-_image_buffer: Optional[ImageBuffer] = None
-
-
-def image_buffer() -> ImageBuffer:
-    global _image_buffer
-    if _image_buffer is None:
-        _image_buffer = ImageBuffer()
-    return _image_buffer
+from perfect_pixel.app_core.image_buffer import ImageBuffer, image_buffer
 
 
 # ============================================================
@@ -289,9 +209,13 @@ class ImageTrayWidget(QWidget):
             return
         try:
             if arr.ndim == 2:
-                img = Image.fromarray(arr)
+                img = Image.fromarray(arr, mode="L")
+            elif arr.shape[2] == 4:
+                # Keep RGBA intact for PNG.  Previously this was sliced to
+                # RGB before the extension check, permanently dropping alpha.
+                img = Image.fromarray(arr, mode="RGBA")
             else:
-                img = Image.fromarray(arr[:, :, :3] if arr.shape[2] == 4 else arr)
+                img = Image.fromarray(arr, mode="RGB")
             ext = Path(path).suffix.lower()
             if ext in (".jpg", ".jpeg"):
                 if img.mode != "RGB":
@@ -667,6 +591,20 @@ class PixelRefineWidget(QWidget):
         self.worker.start()
 
     def on_refine_done(self, w: int, h: int, out: np.ndarray) -> None:
+        # Keep the source alpha as a final guard.  This also protects users
+        # running an older/fallback backend that still returns RGB output.
+        if self.input_image is not None and self.input_image.ndim == 3 and self.input_image.shape[2] == 4:
+            src_alpha = self.input_image[..., 3]
+            out_h, out_w = out.shape[:2]
+            alpha = cv2.resize(src_alpha, (out_w, out_h), interpolation=cv2.INTER_AREA)
+            if out.ndim == 2:
+                out = np.repeat(out[..., None], 3, axis=2)
+            if out.shape[2] == 3:
+                out = np.dstack([out, alpha.astype(np.uint8)])
+            else:
+                out = np.array(out, copy=True)
+                out[..., 3] = alpha.astype(np.uint8)
+            out[out[..., 3] == 0, :3] = 0
         self.output_image = out
         self.view_output.set_image(out)
         scale = self.spn_scale.value()
@@ -698,7 +636,11 @@ class PixelRefineWidget(QWidget):
         if not path:
             return
         try:
-            Image.fromarray(self.output_image).save(path)
+            # Preserve transparency explicitly for RGBA pixel-art exports.
+            if self.output_image.ndim == 3 and self.output_image.shape[2] == 4:
+                Image.fromarray(self.output_image, mode="RGBA").save(path, "PNG")
+            else:
+                Image.fromarray(self.output_image, mode="RGB").save(path)
             self.last_saved_path = path
             self.status_message(f"已保存到 {path}")
         except Exception as exc:  # noqa: BLE001
@@ -2148,6 +2090,11 @@ class MainWindow(QMainWindow):
         ImageCropWidget.set_buffer_ref(image_buffer())
         self.crop_tab = ImageCropWidget()
         self.tabs.addTab(self.crop_tab, "✂️ 图像剪切")
+
+        # 序列帧实时预览
+        from sequence_preview import SequencePreviewWidget
+        self.sequence_tab = SequencePreviewWidget()
+        self.tabs.addTab(self.sequence_tab, "🎞️ 序列帧预览")
 
         root.addWidget(self.tabs, 1)
 

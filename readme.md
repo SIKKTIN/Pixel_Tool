@@ -1,131 +1,124 @@
-# Perfect Pixel
+# Perfect Pixel Tool
 
-> **Auto detect and Get perfect Pixel art**
+Perfect Pixel Tool 是一个面向像素风素材的本地图像工具集，组合了像素网格检测、RGBA 保真处理、缩放、去水印、去背景、手动编辑、裁切、序列帧预览和 MCP 自动化接口。
 
-![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
-![License](https://img.shields.io/badge/license-MIT-green.svg)
+## 功能
 
-<img src="https://github.com/theamusing/perfectPixel/raw/main/assets/process.png" width="100%" />
+- 自动检测并规整像素网格（OpenCV / NumPy 后端）
+- 保留 PNG 的 RGBA 和半透明边缘
+- 最近邻缩放、去水印、去背景、手动编辑
+- 矩形裁切和自由轮廓裁切，裁切外区域保持透明
+- 序列帧预览、播放/暂停、FPS 调整和逐帧查看
+- PySide6 桌面应用、Gradio 网页入口、ComfyUI 节点和 MCP stdio 服务
 
-Standard scaling often fails to sample AI-generated pixel art due to inconsistent sizes and non-square grids. 
+## 项目结构
 
-This tool automatically detects the optimal grid and delivers perfectly aligned, pixel-perfect results.
-
-## Features
-- Automatically detect grid size from pixel style images.
-- Refines AI generated pixel style image to perfectly aligned grids.
-- Easy to integrate into your own workflow.
-
-[Try the Web Demo](https://theamusing.github.io/perfectPixel_webdemo/)
-
-## Installation
-
-**Perfect Pixel** provides two implementations of the same core algorithm. The Lighweight Backend is designed in case you can't or don't want to use cv2. You can choose the one that best fits your environment:
-
-| Feature | OpenCV Backend ([`perfect_pixel.py`](./src/perfect_pixel/perfect_pixel.py)) | Lightweight Backend ([`perfect_pixel_no_cv2.py`](./src/perfect_pixel/perfect_pixel_noCV2.py)) |
-| :--- | :--- | :--- |
-| **Dependencies** | `opencv-python`, `numpy` | `numpy` |
-
-You can install Perfect Pixel via `pip`. It is recommended to install the OpenCV version for better performance.
-
-```bash
-# Recommended: Fast version with OpenCV support
-pip install perfect-pixel[opencv]
-
-# Numpy version: Lightweight (NumPy only)
-pip install perfect-pixel
+```text
+PerfectPixelTool/
+├─ desktop_app.py             # PySide6 桌面入口和模块装配
+├─ app.py                     # Gradio 网页入口
+├─ image_crop.py              # 矩形/自由轮廓裁切
+├─ image_resizer.py           # 最近邻缩放
+├─ image_splitter.py          # 图片切割
+├─ manual_editor.py           # 手动编辑
+├─ sequence_preview.py        # 序列帧预览
+├─ src/perfect_pixel/         # 核心像素网格算法
+├─ src/watermark_remover/     # SLBR/LaMa 去水印
+├─ src/perfect_pixel/background_remover.py # 颜色、通道和 ONNX 去背景
+├─ integrations/comfyui/      # ComfyUI 集成
+├─ mcp_server/                # MCP stdio 服务和 smoke test
+├─ models/                    # 可选模型文件
+├─ dev.bat                    # Windows 开发启动
+├─ build.bat                  # PyInstaller 构建
+└─ requirements.txt           # 桌面/算法依赖
 ```
 
-## ComfyUI
+核心算法通过 `src/perfect_pixel/__init__.py` 选择后端：安装 OpenCV 时使用 `perfect_pixel.py`，否则回退到 `perfect_pixel_noCV2.py`。桌面层负责界面和模块间的图像缓冲，算法层不依赖 Qt。
 
-A ComfyUI custom node is available for integrating Perfect Pixel into ComfyUI workflows.
+## 安装与启动
 
-- No changes to the core Perfect Pixel algorithm
-- Provides a ComfyUI-friendly interface for pixel art refinement
+推荐 Python 3.10+：
 
-- [`Learn how to use Perfect Pixel as a ComfyUI node`](integrations/comfyui/README.md)
-
-## Usage 
-
-### Step 1: Get pixel style image
-First you need extra tools to get a pixel styled image. **The recommanded size is between 512 to 1024.**
-
-You can use Stable Diffusion with any Pixel Style Lora, or you can use ChatGPT or Gemini to generate one.
-
-
-For example, I used ChatGPT to transfer an image into pixel style.
-
-```
-prompt: Convert the input image into a TRUE perler bead pixel pattern designed for physical bead crafting, not digital illustration. Canvas size must be exactly 32×32 pixels OR 16×16 pixels, where each pixel represents exactly one perler bead. Use extremely large, chunky pixels with very few active pixels overall. Simplicity is critical. Only keep the main subject. Remove the entire background. For human characters, make sure the face is flat and no shadow. The subject must be centered with clear empty bead rows around all edges to allow easy mounting on a bead board. Add a clean, continuous dark outline around the subject so the silhouette is clearly readable when made with beads. Use a very limited solid color palette (maximum 6–8 colors total). No gradients, no shading, no lighting, no dithering, no texture. No anti-aliasing or smoothing — every pixel must be a perfect square bead aligned to the grid. The output image should be pixel-perfect, each grid only contains one color. Background must be pure solid white.
+```powershell
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\dev.bat
 ```
 
-<img src="https://github.com/theamusing/perfectPixel/raw/main/assets/generated.png" width="50%" />
+也可以直接运行 `.venv\Scripts\python.exe desktop_app.py`。若提示缺少依赖：
 
-The image is in pixel style but the grids are distorted. Also we don't know the number of grids.
-
-### Step 2: Use Perfect Pixel to refine your image
-
-```python
-import cv2
-from perfect_pixel import get_perfect_pixel
-
-bgr = cv2.imread("images/avatar.png", cv2.IMREAD_COLOR)
-rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-
-w, h, out = get_perfect_pixel(rgb)
+```powershell
+.venv\Scripts\python.exe -m pip install numpy opencv-python Pillow PySide6
 ```
 
-<img src="https://github.com/theamusing/perfectPixel/raw/main/assets/refined2.png" width="50%" />
+网页入口：`.venv\Scripts\python.exe app.py`。
 
-*Also see [example.py](./example.py).*
-```bash
-python example.py
+## MCP 服务
+
+MCP 服务位于 `mcp_server/server.py`，采用 stdio JSON-RPC；stdout 只用于协议消息，诊断信息写入 stderr。启动：
+
+```powershell
+.\start_mcp.bat
 ```
 
-The grid size is automatically detected, and the image is refined.
+当前工具：
 
-<img src="https://github.com/theamusing/perfectPixel/raw/main/assets/process2.png" width="100%" />
+| 工具 | 用途 |
+| --- | --- |
+| `refine_pixel_art` | 自动检测网格并细化像素图 |
+| `resize_image` | 最近邻缩放 |
+| `remove_image_background` | 颜色/通道/可选 AI 去背景 |
+| `check_desktop_startup` | offscreen 创建 `QApplication` 和 `MainWindow`，捕获启动异常 |
+| `inspect_image` | 检查图片模式、尺寸和 Alpha 统计 |
+| `check_project_health` | 编译 Python 文件并检查核心模块导入 |
 
-Try integrate it into your own projects!
+客户端配置：
 
-## API Reference
-| Args | Description | 
-| :--- | :--- |
-| **image** | `RGB Image (H * W * 3)` |
-| **sample_method** | `"center", "median" or "majority"` |
-| **grid_size** | `Manually set grid size (grid_w, grid_h) to override auto-detection` |
-| **min_size** | `Minimum pixel size to consider valid` |
-| **peak_width** | `Minimum peak width for peak detection.` |
-| **refine_intensity** | `Intensity for grid line refinement. Recommended range is [0, 0.5]. Given original estimated grid line at x, the refinement will search in [x * (1 - refine_intensity), x * (1 + refine_intensity)].` |
-| **fix_square** | `Whether to enforce output to be square when detected image is almost square.` |
-| **debug** | `Whether to show debug plots.` |
+```json
+{
+  "command": "E:/Project/TestProject/PerfectPixelTool/.venv/Scripts/python.exe",
+  "args": ["-u", "E:/Project/TestProject/PerfectPixelTool/mcp_server/server.py"],
+  "cwd": "E:/Project/TestProject/PerfectPixelTool"
+}
+```
 
-| Returns | Description |
-| :--- | :--- |
-| **refined_w** | `Width of the refined image` |
-| **refined_h** | `Height of the refined image` |
-| **scaled_image** | `Refined Image(W * H * 3)` |
+运行端到端检查：
 
-## Algorithm
+```powershell
+.venv\Scripts\python.exe -m mcp_server.smoke_test
+```
 
-<img src="https://github.com/theamusing/perfectPixel/raw/main/assets/algorithm.png" width="100%" />
+输出文件默认写入 `mcp_outputs/`。协议和依赖说明见 [`mcp_server/README.md`](mcp_server/README.md)。
 
-The whole algorithm mainly contains 3 steps:
-1. Detect grid size from FFT magnitude of the original image and generate grids.
-2. Detect edges using Sobel and refine the grids by aligning them to edges.
-3. Use the grids to sample the original image and to get the scaled image.
+## 开发与验证
 
-## Star History
+提交前至少执行：
 
-[![Star History Chart](https://api.star-history.com/svg?repos=theamusing/perfectPixel&type=date&legend=top-left)](https://www.star-history.com/#theamusing/perfectPixel&type=date&legend=top-left)
+```powershell
+.venv\Scripts\python.exe -m compileall desktop_app.py image_crop.py image_resizer.py image_splitter.py manual_editor.py sequence_preview.py src mcp_server
+.venv\Scripts\python.exe -m mcp_server.smoke_test
+```
 
-Thanks so much!
+涉及桌面初始化的改动，再运行 `check_desktop_startup`。涉及透明度的改动，确认输入和输出均为 RGBA，并检查完全透明像素的 Alpha 为 0。
 
+## 并行开发约定
 
+1. 算法任务只改 `src/`，通过公开函数和样例图片验证。
+2. 桌面功能任务优先改对应模块；需要改 `desktop_app.py` 时先约定初始化和信号连接位置。
+3. MCP 任务只改 `mcp_server/`，新增工具必须补 schema、错误处理和 smoke test。
+4. 文档和构建任务分别改 `readme.md`、`docs/`、`build.bat`，不要提交临时输出。
+5. 每个并行任务完成后运行语法检查；合并前运行完整 MCP smoke test 和桌面启动检查。
 
+模块通过稳定接口协作：图像数组使用 `numpy.ndarray`，颜色通道明确标注 RGB/RGBA，桌面模块通过 `ImageBuffer` 交换结果。新增功能应先定义输入、输出和 Alpha 行为，再接入 UI。
 
+## 构建发布
 
+```powershell
+.\build.bat
+```
 
+构建配置位于 `PerfectPixelTool.spec`。模型文件较大时不要复制进源码提交，使用 `models/` 下的本地路径或单独配置。
 
+## 许可证
 
-
+项目沿用 MIT 许可证；第三方模型和依赖请遵循各自许可证。

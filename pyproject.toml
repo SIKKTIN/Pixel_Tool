@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "perfect-pixel"
 version = "0.1.5"
 description = "A local desktop tool for pixel-art refinement, image scaling, and watermark removal."
-readme = "README.md"
+readme = "readme.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [
@@ -32,6 +32,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+mcp = ["mcp>=1.28,<2"]
 # pip install "perfect-pixel[opencv]"  (默认已含 opencv-python,保留向后兼容)
 opencv = ["opencv-python>=4.8.0"]
 # pip install "perfect-pixel[inpaint]"  启用去水印 (SLBR + LaMa)

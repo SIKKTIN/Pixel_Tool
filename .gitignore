@@ -12,6 +12,7 @@ __pycache__/
 *.pyo
 
 output/
+mcp_outputs/
 output*.png
 compare*.png
 
