@@ -1295,29 +1295,30 @@ class BackgroundRemoverWidget(QWidget):
         self._shared_controls_layout.addLayout(ctrl_row)
 
         # ---- 模式切换标签 ------------------------------------------------
-        mode_bar = QHBoxLayout()
-        mode_bar.setSpacing(6)
-        mode_bar.addWidget(QLabel("模式:"))
+        mode_bar = QGridLayout()
+        mode_bar.setHorizontalSpacing(6)
+        mode_bar.setVerticalSpacing(4)
+        mode_bar.addWidget(QLabel("模式:"), 0, 0)
 
         self._mode_group = QButtonGroup()
         self._mode_buttons: dict[str, QPushButton] = {}
-        for label, val in [("按颜色", "color"), ("按通道", "channel"), ("棋盘格背景", "checkerboard"), ("AI 智能", "ai")]:
+        for idx, (label, val) in enumerate([("按颜色", "color"), ("按通道", "channel"), ("棋盘格背景", "checkerboard"), ("AI 智能", "ai")]):
             btn = QPushButton(label)
             btn.setCheckable(True)
-            btn.setFixedWidth(80)
+            btn.setMinimumWidth(82)
             btn.setCursor(Qt.PointingHandCursor)
             self._mode_group.addButton(btn)
             self._mode_buttons[val] = btn
-            mode_bar.addWidget(btn)
-        mode_bar.addStretch(1)
+            mode_bar.addWidget(btn, idx // 2, (idx % 2) + 1)
+        mode_bar.setColumnStretch(3, 1)
         self._shared_controls_layout.addLayout(mode_bar)
         self._mode_group.buttonClicked.connect(self._on_mode_changed)
         # 默认选中"按颜色"
         self._mode_buttons["color"].setChecked(True)
 
         # ---- 操作区：按职责分组，避免处理/导出/暂存按钮混在一起 ----
-        action_row = QHBoxLayout()
-        action_row.setSpacing(10)
+        action_row = QVBoxLayout()
+        action_row.setSpacing(6)
 
         process_box = QGroupBox("处理")
         process_layout = QHBoxLayout(process_box)
@@ -1359,7 +1360,6 @@ class BackgroundRemoverWidget(QWidget):
         self.btn_add_to_tray.setEnabled(False)
         tray_layout.addWidget(self.btn_add_to_tray)
         action_row.addWidget(tray_box)
-        action_row.addStretch(1)
 
         self._shared_controls_layout.addLayout(action_row)
 
