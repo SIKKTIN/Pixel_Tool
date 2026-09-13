@@ -31,6 +31,26 @@ OUTPUT_DIR = Path("mcp_outputs")
 _desktop_process: subprocess.Popen[bytes] | None = None
 
 
+def _count_components(mask: np.ndarray) -> int:
+    """Count 4-connected true regions without requiring OpenCV."""
+    seen = np.zeros(mask.shape, dtype=bool)
+    count = 0
+    h, w = mask.shape
+    for y, x in zip(*np.nonzero(mask)):
+        if seen[y, x]:
+            continue
+        count += 1
+        stack = [(int(y), int(x))]
+        seen[y, x] = True
+        while stack:
+            cy, cx = stack.pop()
+            for ny, nx in ((cy - 1, cx), (cy + 1, cx), (cy, cx - 1), (cy, cx + 1)):
+                if 0 <= ny < h and 0 <= nx < w and mask[ny, nx] and not seen[ny, nx]:
+                    seen[ny, nx] = True
+                    stack.append((ny, nx))
+    return count
+
+
 def _load(path: str) -> np.ndarray:
     p = Path(path).expanduser().resolve()
     if not p.is_file():
@@ -105,27 +125,45 @@ def remove_fake_checkerboard(
     tolerance: float = 18.0,
     anti_alias: bool = True,
     binary_alpha: bool = False,
+    cleanup_islands: bool = True,
+    min_component_size: int = 4,
+    edge_shrink: int = 1,
 ) -> dict[str, Any]:
     """Remove a baked white/gray checkerboard and export an RGBA PNG."""
     if tile_size is not None and tile_size < 1:
         raise ValueError("tile_size must be positive or null")
     if tolerance < 0 or tolerance > 100:
         raise ValueError("tolerance must be between 0 and 100")
+    if min_component_size < 1:
+        raise ValueError("min_component_size must be at least 1")
+    if edge_shrink < 0 or edge_shrink > 8:
+        raise ValueError("edge_shrink must be between 0 and 8")
     p = Path(input_path).expanduser().resolve()
     if not p.is_file():
         raise FileNotFoundError(f"Image not found: {p}")
     image = load_rgba(p)
+    baseline = _remove_fake_checkerboard(
+        image, tile_size=tile_size, tolerance=float(tolerance),
+        anti_alias=bool(anti_alias), binary_alpha=bool(binary_alpha),
+        cleanup_islands=False, min_component_size=1, edge_shrink=int(edge_shrink),
+    )
     result = _remove_fake_checkerboard(
         image, tile_size=tile_size, tolerance=float(tolerance),
         anti_alias=bool(anti_alias), binary_alpha=bool(binary_alpha),
+        cleanup_islands=bool(cleanup_islands),
+        min_component_size=int(min_component_size), edge_shrink=int(edge_shrink),
     )
     output = _save(result, "checkerboard")
     alpha = result[..., 3]
+    baseline_alpha = baseline[..., 3]
     return {
         "output_path": str(output), "width": int(result.shape[1]),
         "height": int(result.shape[0]), "mode": "RGBA",
         "transparent_pixels": int(np.count_nonzero(alpha == 0)),
         "partial_alpha_pixels": int(np.count_nonzero((alpha > 0) & (alpha < 255))),
+        "removed_island_pixels": int(max(0, np.count_nonzero(baseline_alpha > 0) - np.count_nonzero(alpha > 0))),
+        "edge_shrink": int(edge_shrink),
+        "remaining_components": int(_count_components(alpha > 0)),
     }
 
 

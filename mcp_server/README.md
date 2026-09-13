@@ -37,6 +37,10 @@ and needs further model-path integration and optional ONNX dependencies.
 
 `inspect_image` reports mode, dimensions, and alpha coverage without modifying
 the file, which is useful when diagnosing transparent sprite exports.
+`remove_fake_checkerboard` also supports `cleanup_islands`,
+`min_component_size` (default 4), and `edge_shrink` (default 1) to remove
+isolated residual pixels and checker-coloured edge fringes while preserving
+connected foreground details.
 `check_project_health` compiles project Python files and imports the core modules
 (and optionally the desktop module), making it safe to run before parallel
 feature work. `check_desktop_startup` separately constructs the Qt main window

@@ -83,6 +83,67 @@ def _connected_from_edge(mask: np.ndarray) -> np.ndarray:
     return seen
 
 
+def _remove_small_components(mask: np.ndarray, minimum: int) -> tuple[np.ndarray, int]:
+    """Remove disconnected foreground islands smaller than ``minimum`` pixels."""
+    if minimum <= 1:
+        return mask, 0
+    h, w = mask.shape
+    seen = np.zeros_like(mask, bool)
+    removed = 0
+    cleaned = mask.copy()
+    for y0, x0 in zip(*np.nonzero(mask)):
+        if seen[y0, x0]:
+            continue
+        stack = [(int(y0), int(x0))]
+        seen[y0, x0] = True
+        pixels = []
+        while stack:
+            y, x = stack.pop()
+            pixels.append((y, x))
+            for yy, xx in ((y - 1, x), (y + 1, x), (y, x - 1), (y, x + 1)):
+                if 0 <= yy < h and 0 <= xx < w and mask[yy, xx] and not seen[yy, xx]:
+                    seen[yy, xx] = True
+                    stack.append((yy, xx))
+        if len(pixels) < minimum:
+            removed += len(pixels)
+            for y, x in pixels:
+                cleaned[y, x] = False
+    return cleaned, removed
+
+
+def _shrink_checker_fringe(
+    alpha: np.ndarray,
+    rgb: np.ndarray,
+    c0: np.ndarray,
+    c1: np.ndarray,
+    tolerance: float,
+    radius: int,
+    anti_alias: bool,
+) -> np.ndarray:
+    """Trim only checker-coloured pixels at the foreground boundary."""
+    if radius <= 0:
+        return alpha
+    result = alpha.copy()
+    limit = float(tolerance) * np.sqrt(3.0) * 1.8
+    close = np.minimum(
+        np.sqrt(np.sum((rgb - c0) ** 2, axis=2)),
+        np.sqrt(np.sum((rgb - c1) ** 2, axis=2)),
+    ) <= limit
+    for _ in range(int(radius)):
+        solid = result > 0
+        nbr_bg = np.zeros_like(solid)
+        nbr_bg[1:] |= ~solid[:-1]
+        nbr_bg[:-1] |= ~solid[1:]
+        nbr_bg[:, 1:] |= ~solid[:, :-1]
+        nbr_bg[:, :-1] |= ~solid[:, 1:]
+        fringe = solid & nbr_bg & close
+        if anti_alias:
+            result[fringe] = np.minimum(result[fringe], 96)
+        else:
+            result[fringe] = 0
+    return result
+
+
 def remove_fake_checkerboard(
     image: np.ndarray,
     *,
@@ -90,6 +151,9 @@ def remove_fake_checkerboard(
     tolerance: float = 18.0,
     anti_alias: bool = True,
     binary_alpha: bool = False,
+    cleanup_islands: bool = True,
+    min_component_size: int = 4,
+    edge_shrink: int = 1,
 ) -> np.ndarray:
     """Remove a baked checkerboard background and return contiguous RGBA uint8."""
     if binary_alpha:
@@ -118,6 +182,14 @@ def remove_fake_checkerboard(
         nbr[:, 1:] |= bg[:, :-1]; nbr[:, :-1] |= bg[:, 1:]
         soft = nbr & ~bg & close
         out_alpha[soft] = np.minimum(out_alpha[soft], 128)
+    if binary_alpha:
+        out_alpha = np.where(out_alpha >= 128, 255, 0).astype(np.uint8)
+    if cleanup_islands:
+        foreground, _ = _remove_small_components(out_alpha > 0, max(1, int(min_component_size)))
+        out_alpha[~foreground] = 0
+    out_alpha = _shrink_checker_fringe(
+        out_alpha, rgb, c0, c1, float(tolerance), int(edge_shrink), anti_alias and not binary_alpha
+    )
     if binary_alpha:
         out_alpha = np.where(out_alpha >= 128, 255, 0).astype(np.uint8)
     arr[..., 3] = out_alpha

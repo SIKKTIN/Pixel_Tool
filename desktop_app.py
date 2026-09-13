@@ -1156,6 +1156,7 @@ class BGRWorker(QThread):
         ch_feather, ch_edge_shrink,
         ai_model, ai_edge_shrink,
         checker_tile_size, checker_tolerance, checker_anti_alias, checker_binary_alpha,
+        checker_cleanup_islands, checker_min_component_size, checker_edge_shrink,
     ) -> None:
         super().__init__()
         self.mode = mode
@@ -1181,6 +1182,9 @@ class BGRWorker(QThread):
         self.checker_tolerance = checker_tolerance
         self.checker_anti_alias = checker_anti_alias
         self.checker_binary_alpha = checker_binary_alpha
+        self.checker_cleanup_islands = checker_cleanup_islands
+        self.checker_min_component_size = checker_min_component_size
+        self.checker_edge_shrink = checker_edge_shrink
 
     def run(self) -> None:
         try:
@@ -1239,6 +1243,9 @@ class BGRWorker(QThread):
                 tolerance=float(self.checker_tolerance),
                 anti_alias=bool(self.checker_anti_alias),
                 binary_alpha=bool(self.checker_binary_alpha),
+                cleanup_islands=bool(self.checker_cleanup_islands),
+                min_component_size=int(self.checker_min_component_size),
+                edge_shrink=int(self.checker_edge_shrink),
             )
         return None
 
@@ -1562,6 +1569,18 @@ class BackgroundRemoverWidget(QWidget):
         self._checker_binary_alpha.setChecked(False)
         self._checker_binary_alpha.toggled.connect(self._on_checker_binary_toggled)
 
+        self._checker_cleanup_islands = QCheckBox("清理孤立色块")
+        self._checker_cleanup_islands.setChecked(True)
+        self._checker_cleanup_islands.toggled.connect(self._mark_dirty)
+        self._checker_min_component_size = QSpinBox()
+        self._checker_min_component_size.setRange(1, 10000)
+        self._checker_min_component_size.setValue(4)
+        self._checker_min_component_size.valueChanged.connect(self._mark_dirty)
+        self._checker_edge_shrink = QSpinBox()
+        self._checker_edge_shrink.setRange(0, 8)
+        self._checker_edge_shrink.setValue(1)
+        self._checker_edge_shrink.valueChanged.connect(self._mark_dirty)
+
         lay = QFormLayout(self._page_checkerboard)
         lay.setContentsMargins(10, 14, 10, 10)
         lay.setSpacing(8)
@@ -1569,6 +1588,9 @@ class BackgroundRemoverWidget(QWidget):
         lay.addRow("颜色容差", self._checker_tolerance)
         lay.addRow("边缘处理", self._checker_anti_alias)
         lay.addRow("", self._checker_binary_alpha)
+        lay.addRow("后处理", self._checker_cleanup_islands)
+        lay.addRow("最小色块尺寸", self._checker_min_component_size)
+        lay.addRow("轮廓收缩 (px)", self._checker_edge_shrink)
 
     def _on_checker_anti_alias_toggled(self, checked: bool) -> None:
         if checked and self._checker_binary_alpha.isChecked():
@@ -1942,6 +1964,9 @@ class BackgroundRemoverWidget(QWidget):
                     tolerance=float(self._checker_tolerance.value()),
                     anti_alias=self._checker_anti_alias.isChecked(),
                     binary_alpha=self._checker_binary_alpha.isChecked(),
+                    cleanup_islands=self._checker_cleanup_islands.isChecked(),
+                    min_component_size=self._checker_min_component_size.value(),
+                    edge_shrink=self._checker_edge_shrink.value(),
                 )
         except Exception as exc:
             QMessageBox.warning(self, "处理失败", str(exc))
@@ -2013,6 +2038,9 @@ class BackgroundRemoverWidget(QWidget):
             checker_tolerance=self._checker_tolerance.value(),
             checker_anti_alias=self._checker_anti_alias.isChecked(),
             checker_binary_alpha=self._checker_binary_alpha.isChecked(),
+            checker_cleanup_islands=self._checker_cleanup_islands.isChecked(),
+            checker_min_component_size=self._checker_min_component_size.value(),
+            checker_edge_shrink=self._checker_edge_shrink.value(),
         )
         self._worker.finished.connect(self._on_worker_done)
         self._worker.failed.connect(self._on_worker_failed)

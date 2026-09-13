@@ -41,6 +41,32 @@ def test_auto_tile_detection():
     assert result[0, 0, 3] == 0
 
 
+def test_cleanup_removes_small_islands_but_keeps_large_foreground():
+    img = checker(h=40, w=48, tile=4)
+    img[12:28, 16:32, :3] = [210, 45, 35]
+    img[12:28, 16:32, 3] = 255
+    img[4, 4, :3] = [0, 255, 0]
+    img[4, 4, 3] = 255
+    img[10:15, 40:45, :3] = [120, 120, 120]
+    img[10:15, 40:45, 3] = 255
+    result = remove_fake_checkerboard(
+        img, tile_size=4, tolerance=12, binary_alpha=True,
+        cleanup_islands=True, min_component_size=4, edge_shrink=0,
+    )
+    assert result[4, 4, 3] == 0
+    assert result[12, 42, 3] == 255
+    assert result[20, 24, 3] == 255
+
+
+def test_edge_shrink_only_softens_checker_coloured_fringe():
+    img = checker(h=32, w=40, tile=4)
+    img[10:22, 12:28, :3] = [220, 40, 30]
+    img[10:22, 12:28, 3] = 255
+    result = remove_fake_checkerboard(img, tile_size=4, tolerance=12, edge_shrink=1, anti_alias=True)
+    assert result[15, 20, 3] == 255
+    assert result[15, 20, 3] == 255
+
+
 class FakeCheckerboardTests(unittest.TestCase):
     def test_checkerboard_removed_and_foreground_preserved(self):
         test_checkerboard_removed_and_foreground_preserved()
@@ -50,3 +76,9 @@ class FakeCheckerboardTests(unittest.TestCase):
 
     def test_auto_tile_detection(self):
         test_auto_tile_detection()
+
+    def test_cleanup_removes_small_islands_but_keeps_large_foreground(self):
+        test_cleanup_removes_small_islands_but_keeps_large_foreground()
+
+    def test_edge_shrink_only_softens_checker_coloured_fringe(self):
+        test_edge_shrink_only_softens_checker_coloured_fringe()
