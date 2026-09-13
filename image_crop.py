@@ -517,8 +517,10 @@ class CropView(QGraphicsView):
             super().wheelEvent(event)
 
     def _map_to_image(self, pt: QPointF) -> QPointF:
-        m = self.transform()
-        return QPointF(pt.x() / m.m11(), pt.y() / m.m22())
+        # mapToScene() has already applied the view transform and scroll
+        # offset. Dividing by the transform again introduced scale-dependent
+        # cursor drift in freeform cropping.
+        return QPointF(pt.x(), pt.y())
 
     def _hit_handle(self, scene_pt: QPointF) -> str | None:
         """检测鼠标是否悬停在某手柄上。"""
