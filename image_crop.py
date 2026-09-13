@@ -965,48 +965,6 @@ class ImageCropWidget(QWidget):
         name = path.split("/")[-1]
         self._load(arr, f"裁剪: {name}")
 
-    def load(self, arr: np.ndarray | None) -> None:
-        """供暂存区双击调用：将图片送入裁剪视图。"""
-        self.crop_view.load_image(arr)
-        if arr is not None:
-            h, w = arr.shape[:2]
-            self.lbl_info.setText(f"图像尺寸: {w} × {h}")
-
-    def _on_load_buffer(self) -> None:
-        if self._buf is None:
-            QMessageBox.warning(self, "暂存区不可用", "暂存区未初始化")
-            return
-        items = self._buf.items()
-        if not items:
-            QMessageBox.information(self, "暂存区为空", "暂存区里没有图片")
-            return
-        latest = items[-1]
-        self._load(latest["image"], latest.get("source_tab", ""))
-
-    def _load(self, rgba: np.ndarray, source_tab: str) -> None:
-        if rgba.ndim == 2:
-            rgba = np.stack([rgba] * 3, axis=-1)
-        if rgba.shape[2] == 3:
-            rgba = np.dstack([rgba, np.full(rgba.shape[:2], 255, dtype=np.uint8)])
-        rgba = np.ascontiguousarray(rgba, dtype=np.uint8)
-
-        self._source = rgba
-        self._src_tab = source_tab
-        self._src_h, self._src_w = rgba.shape[:2]
-
-        self.crop_view.load_image(rgba)
-        self.lbl_info.setText(f"{self._src_w} × {self._src_h} px")
-
-        tw = self.spin_tw.value()
-        th = self.spin_th.value()
-        self._set_selection_by_anchor(tw, th, self._anchor_group.checkedId())
-        self._result = None
-        self.preview_view.load(None)
-        self.btn_export.setEnabled(False)
-        self.btn_to_buf.setEnabled(False)
-        self.lbl_result.setText("")
-        self.lbl_status.setText(f"已载入 {self._src_w}×{self._src_h} | 目标 {tw}×{th} | 拖拽选区或点「生成裁剪预览」")
-
     # ------------------------------------------------------------------
     # 选区 / 锚点 / 目标尺寸变化
     # ------------------------------------------------------------------
