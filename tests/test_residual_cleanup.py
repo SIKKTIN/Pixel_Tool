@@ -26,9 +26,22 @@ def test_residual_cleanup_binary_alpha():
     assert set(np.unique(result[..., 3])).issubset({0, 255})
 
 
+def test_stronger_cleanup_removes_more_neutral_edge_specks():
+    img = np.zeros((16, 16, 4), np.uint8)
+    img[4:12, 4:12, :3] = [80, 40, 20]
+    img[4:12, 4:12, 3] = 255
+    img[4, 7, :3] = [240, 240, 240]
+    weak = cleanup_background_residuals(img, edge_strength=0, edge_radius=1, anti_alias=False)
+    strong = cleanup_background_residuals(img, edge_strength=255, edge_radius=1, anti_alias=False)
+    assert strong[4, 7, 3] <= weak[4, 7, 3]
+
+
 class ResidualCleanupTests(unittest.TestCase):
     def test_island_and_hidden_rgb(self):
         test_residual_cleanup_removes_island_and_clears_hidden_rgb()
 
     def test_binary_alpha(self):
         test_residual_cleanup_binary_alpha()
+
+    def test_stronger_cleanup(self):
+        test_stronger_cleanup_removes_more_neutral_edge_specks()

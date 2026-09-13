@@ -54,12 +54,24 @@ def cleanup_background_residuals(
         chroma = rgb.max(axis=2) - rgb.min(axis=2)
         inner = np.zeros_like(lum)
         count = np.zeros_like(lum)
-        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-            shifted = np.roll(np.roll(lum, dy, axis=0), dx, axis=1)
-            valid = np.roll(np.roll(solid, dy, axis=0), dx, axis=1)
-            inner += np.where(valid, shifted, 0); count += valid
+        bright_neighbors = np.zeros_like(lum)
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if not (dy or dx):
+                    continue
+                shifted = np.roll(np.roll(lum, dy, axis=0), dx, axis=1)
+                valid = np.roll(np.roll(solid, dy, axis=0), dx, axis=1)
+                inner += np.where(valid, shifted, 0); count += valid
+                bright_neighbors += valid & (shifted > 150)
         inner = inner / np.maximum(count, 1)
-        fringe = solid & near_empty & (lum > 190) & (chroma < 70) & ((lum - inner) > float(edge_strength))
+        # Small baked squares are often connected to the sprite by one pixel,
+        # so component filtering alone cannot remove them. Detect a neutral
+        # bright pixel with a dark local neighbourhood as a matte speck.
+        # Larger UI values mean stronger cleanup. Keep a small minimum contrast
+        # so 255 does not become a no-op or erase every bright highlight.
+        contrast_threshold = max(4.0, 36.0 - float(edge_strength) * 0.125)
+        speck = (lum > 175) & (chroma < 90) & (bright_neighbors <= 3) & ((lum - inner) > contrast_threshold)
+        fringe = solid & (near_empty | speck) & speck
         alpha[fringe] = np.minimum(alpha[fringe], 96 if anti_alias else 0)
     if not anti_alias:
         alpha = np.where(alpha >= 128, 255, 0).astype(np.uint8)

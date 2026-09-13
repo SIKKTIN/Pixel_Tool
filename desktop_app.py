@@ -1698,7 +1698,7 @@ class BackgroundRemoverWidget(QWidget):
         lay.setContentsMargins(10, 14, 10, 10)
         lay.setSpacing(8)
         lay.addRow("最小独立色块尺寸", self._residual_min_component_size)
-        lay.addRow("边缘颜色差异", self._residual_edge_strength)
+        lay.addRow("边缘清理强度", self._residual_edge_strength)
         lay.addRow("边缘清理半径 (px)", self._residual_edge_radius)
         lay.addRow("边缘处理", self._residual_anti_alias)
 
