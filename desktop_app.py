@@ -2228,6 +2228,9 @@ class BackgroundRemoverWidget(QWidget):
             self.status_message("处理未产生结果")
             return
         self.output_rgba = result
+        self.btn_export_png.setEnabled(True)
+        self.btn_export_rgb.setEnabled(True)
+        self.btn_add_to_tray.setEnabled(True)
         if self._get_current_mode() == "black_white":
             if self._bw_black_image is not None:
                 self._bw_black_preview.set_image(self._bw_black_image)
