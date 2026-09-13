@@ -23,6 +23,7 @@ if str(_ROOT / "src") not in sys.path:
 
 from perfect_pixel import get_perfect_pixel
 from perfect_pixel.background_remover import remove_background
+from perfect_pixel.app_core.image_io import load_rgb, save_png
 
 mcp = FastMCP("PerfectPixelTool")
 OUTPUT_DIR = Path("mcp_outputs")
@@ -32,13 +33,14 @@ def _load(path: str) -> np.ndarray:
     p = Path(path).expanduser().resolve()
     if not p.is_file():
         raise FileNotFoundError(f"Image not found: {p}")
-    return np.array(Image.open(p).convert("RGB"), dtype=np.uint8)
+    return load_rgb(p)
 
 
 def _save(arr: np.ndarray, stem: str) -> Path:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    out = OUTPUT_DIR / f"{stem}.png"
-    Image.fromarray(np.asarray(arr, dtype=np.uint8)).save(out)
+    import uuid
+    out = OUTPUT_DIR / f"{stem}_{uuid.uuid4().hex[:10]}.png"
+    save_png(out, np.asarray(arr, dtype=np.uint8))
     return out.resolve()
 
 
