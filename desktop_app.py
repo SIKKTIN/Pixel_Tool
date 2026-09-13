@@ -409,11 +409,6 @@ def numpy_to_qpixmap(arr: np.ndarray) -> QPixmap:
     return QPixmap.fromImage(qimg)
 
 
-def resize_nearest(arr: np.ndarray, factor: int) -> np.ndarray:
-    h, w = arr.shape[:2]
-    return np.repeat(np.repeat(arr, factor, axis=0), factor, axis=1)
-
-
 # ---------------------------------------------------------------------------
 # 后台工作线程
 # ---------------------------------------------------------------------------
@@ -502,12 +497,6 @@ class PixelRefineWidget(QWidget):
         self.chk_square.setChecked(True)
         ctrl_row.addWidget(self.chk_square)
 
-        ctrl_row.addWidget(QLabel("预览倍数:"))
-        self.spn_scale = QSpinBox()
-        self.spn_scale.setRange(2, 32)
-        self.spn_scale.setValue(8)
-        ctrl_row.addWidget(self.spn_scale)
-
         self.btn_run = QPushButton("生成像素图")
         self.btn_run.setDefault(True)
         self.btn_run.clicked.connect(self.on_run)
@@ -516,14 +505,13 @@ class PixelRefineWidget(QWidget):
         ctrl_row.addStretch(1)
         root.addLayout(ctrl_row)
 
-        # ---- 三列预览区 --------------------------------------------------
+        # ---- 双列预览区 --------------------------------------------------
         preview_row = QHBoxLayout()
         preview_row.setSpacing(10)
 
         self.view_input = ImageView("原图")
         self.view_output = ImageView("像素化结果")
-        self.view_preview = ImageView("放大预览")
-        for v in (self.view_input, self.view_output, self.view_preview):
+        for v in (self.view_input, self.view_output):
             preview_row.addWidget(v, 1)
         root.addLayout(preview_row, 1)
 
@@ -565,7 +553,6 @@ class PixelRefineWidget(QWidget):
         self.input_image = np.array(img)
         self.view_input.set_image(self.input_image)
         self.view_output.clear()
-        self.view_preview.clear()
         self.output_image = None
         self.btn_save.setEnabled(False)
         self.last_saved_path = None
@@ -607,16 +594,12 @@ class PixelRefineWidget(QWidget):
             out[out[..., 3] == 0, :3] = 0
         self.output_image = out
         self.view_output.set_image(out)
-        scale = self.spn_scale.value()
-        preview = resize_nearest(out, scale)
-        self.view_preview.set_image(preview)
-        self.view_preview.info_label.setText(f"{w * scale} × {h * scale} px ({scale}×)")
         self.btn_run.setEnabled(True)
         self.btn_run.setText("生成像素图")
         self.btn_save.setEnabled(True)
         image_buffer().push(out, source_tab="像素细化")
         self.status_message(
-            f"网格 {w} × {h}  |  预览 {scale}×  "
+            f"网格 {w} × {h}  "
             f"|  采样 {self.cmb_sample.currentText()}"
         )
 
@@ -651,7 +634,6 @@ class PixelRefineWidget(QWidget):
         self.input_image = np.ascontiguousarray(image, dtype=np.uint8)
         self.view_input.set_image(self.input_image)
         self.view_output.clear()
-        self.view_preview.clear()
         self.output_image = None
         self.btn_save.setEnabled(False)
         self.last_saved_path = None

@@ -12,7 +12,6 @@ import gradio as gr
 from perfect_pixel import get_perfect_pixel
 
 SAMPLE_METHODS = ["center", "median", "majority"]
-SCALE_OPTIONS = [4, 8, 12, 16]
 
 
 def _to_uint8_rgb(arr: np.ndarray) -> np.ndarray:
@@ -26,19 +25,11 @@ def _to_uint8_rgb(arr: np.ndarray) -> np.ndarray:
     return arr
 
 
-def _resize_nearest(img: np.ndarray, factor: int) -> np.ndarray:
-    """用最近邻放大,纯 numpy 实现,避免再依赖 PIL 之外的 resize 库。"""
-    h, w = img.shape[:2]
-    out = np.repeat(np.repeat(img, factor, axis=0), factor, axis=1)
-    return out
-
-
 def refine(
     image: np.ndarray | None,
     sample_method: str,
     refine_intensity: float,
     fix_square: bool,
-    preview_scale: int,
 ):
     if image is None:
         raise gr.Error("请先上传一张图片")
@@ -59,14 +50,11 @@ def refine(
     if out.dtype != np.uint8:
         out = np.clip(out, 0, 255).astype(np.uint8)
 
-    preview = _resize_nearest(out, preview_scale)
-
     info = (
         f"输出尺寸: **{w} × {h}**  "
-        f"|  预览倍数: **{preview_scale}×**  "
         f"|  采样: `{sample_method}`"
     )
-    return rgb, out, preview, info
+    return rgb, out, info
 
 
 with gr.Blocks(title="Perfect Pixel Tool") as demo:
@@ -93,24 +81,19 @@ with gr.Blocks(title="Perfect Pixel Tool") as demo:
                 label="网格对齐强度 refine_intensity",
             )
             fix_square = gr.Checkbox(value=True, label="近似正方形时强制输出正方形")
-            preview_scale = gr.Radio(
-                SCALE_OPTIONS, value=8, label="预览放大倍数"
-            )
             run_btn = gr.Button("生成像素图", variant="primary")
 
         with gr.Column(scale=2):
             info_md = gr.Markdown("等待输入…")
             with gr.Tab("像素化结果"):
                 out_native = gr.Image(label="像素化结果 (原始尺寸)", height=320)
-            with gr.Tab("放大预览"):
-                out_scaled = gr.Image(label=f"放大预览", height=480)
             with gr.Tab("原图"):
                 inp_preview = gr.Image(label="原图", height=320)
 
     run_btn.click(
         refine,
-        inputs=[inp_img, sample_method, refine_intensity, fix_square, preview_scale],
-        outputs=[inp_preview, out_native, out_scaled, info_md],
+        inputs=[inp_img, sample_method, refine_intensity, fix_square],
+        outputs=[inp_preview, out_native, info_md],
     )
 
 if __name__ == "__main__":
