@@ -412,7 +412,7 @@ class CropView(QGraphicsView):
         if len(self._free_polygon) >= 2:
             painter = QPainter(self.viewport())
             painter.setRenderHint(QPainter.Antialiasing, True)
-            pen = QPen(QColor(255, 190, 40), 2); pen.setCosmetic(True)
+            pen = QPen(QColor(255, 210, 40), 4); pen.setCosmetic(True)
             painter.setPen(pen)
             pts = [self.mapFromScene(p) for p in self._free_polygon]
             if len(pts) >= 3:
@@ -421,6 +421,16 @@ class CropView(QGraphicsView):
                 painter.setBrush(Qt.NoBrush)
             for a, b in zip(pts, pts[1:]): painter.drawLine(a, b)
             if not self._free_drawing and len(pts) > 2: painter.drawLine(pts[-1], pts[0])
+            # Add a visible bounding frame and vertex markers so the crop
+            # remains readable over detailed sprite sheets.
+            if len(pts) >= 2:
+                min_x = min(p.x() for p in pts); max_x = max(p.x() for p in pts)
+                min_y = min(p.y() for p in pts); max_y = max(p.y() for p in pts)
+                frame_pen = QPen(QColor(80, 230, 255), 2, Qt.DashLine); frame_pen.setCosmetic(True)
+                painter.setPen(frame_pen); painter.setBrush(Qt.NoBrush)
+                painter.drawRect(QRectF(min_x, min_y, max_x-min_x, max_y-min_y))
+                painter.setPen(QPen(QColor(255, 255, 255), 1)); painter.setBrush(QBrush(QColor(255, 190, 40)))
+                for point in pts: painter.drawEllipse(point, 4, 4)
             painter.end()
         if self._crop_box is None or self._image_size == (0, 0) or self._pix_item is None:
             return
