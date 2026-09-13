@@ -23,6 +23,8 @@ if str(_ROOT / "src") not in sys.path:
 
 from perfect_pixel import get_perfect_pixel, remove_fake_checkerboard as _remove_fake_checkerboard
 from perfect_pixel import cleanup_background_residuals as _cleanup_background_residuals
+from perfect_pixel import remove_background_black_white as _remove_background_black_white
+from perfect_pixel import reconstruction_error as _reconstruction_error
 from perfect_pixel.background_remover import remove_background
 from perfect_pixel.app_core.image_io import load_rgb, save_png
 from perfect_pixel.app_core.image_io import load_rgba
@@ -200,6 +202,43 @@ def cleanup_background_residuals(
         "transparent_pixels": int(np.count_nonzero(alpha == 0)),
         "partial_alpha_pixels": int(np.count_nonzero((alpha > 0) & (alpha < 255))),
         "remaining_components": int(_count_components(alpha > 0)),
+    }
+
+
+@mcp.tool()
+def remove_background_black_white(
+    black_path: str,
+    white_path: str,
+    background_black: list[int] | None = None,
+    background_white: list[int] | None = None,
+    anti_alias: bool = True,
+    binary_alpha: bool = False,
+) -> dict[str, Any]:
+    """Recover RGBA from aligned black- and white-background composites."""
+    black_file = Path(black_path).expanduser().resolve()
+    white_file = Path(white_path).expanduser().resolve()
+    if not black_file.is_file() or not white_file.is_file():
+        raise FileNotFoundError("Both black_path and white_path must exist")
+    bb = tuple(int(x) for x in (background_black or [0, 0, 0]))
+    bw = tuple(int(x) for x in (background_white or [255, 255, 255]))
+    if len(bb) != 3 or len(bw) != 3 or any(x < 0 or x > 255 for x in (*bb, *bw)):
+        raise ValueError("background colors must contain three values in 0..255")
+    black = load_rgba(black_file)
+    white = load_rgba(white_file)
+    result = _remove_background_black_white(
+        black, white, background_black=bb, background_white=bw,
+        anti_alias=bool(anti_alias), binary_alpha=bool(binary_alpha),
+    )
+    error = _reconstruction_error(black, white, result, background_black=bb, background_white=bw)
+    output = _save(result, "black_white")
+    alpha = result[..., 3]
+    return {
+        "output_path": str(output), "width": int(result.shape[1]),
+        "height": int(result.shape[0]), "mode": "RGBA",
+        "transparent_pixels": int(np.count_nonzero(alpha == 0)),
+        "partial_alpha_pixels": int(np.count_nonzero((alpha > 0) & (alpha < 255))),
+        "mean_reconstruction_error": float(error.mean()),
+        "low_confidence_pixels": int(np.count_nonzero(error > 18.0)),
     }
 
 

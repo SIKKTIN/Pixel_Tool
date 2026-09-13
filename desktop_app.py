@@ -379,9 +379,11 @@ from perfect_pixel.background_remover import (
 try:
     from perfect_pixel.fake_checkerboard import remove_fake_checkerboard
     from perfect_pixel.residual_cleanup import cleanup_background_residuals
+    from perfect_pixel.black_white_matte import remove_background_black_white
 except ImportError:  # optional during staged development
     remove_fake_checkerboard = None
     cleanup_background_residuals = None
+    remove_background_black_white = None
 
 
 # ---------------------------------------------------------------------------
@@ -1160,6 +1162,7 @@ class BGRWorker(QThread):
         checker_tile_size, checker_tolerance, checker_anti_alias, checker_binary_alpha,
         checker_cleanup_islands, checker_min_component_size, checker_edge_shrink,
         residual_min_component_size, residual_edge_strength, residual_edge_radius, residual_anti_alias,
+        bw_black_image, bw_white_image, bw_anti_alias, bw_binary_alpha,
     ) -> None:
         super().__init__()
         self.mode = mode
@@ -1192,6 +1195,10 @@ class BGRWorker(QThread):
         self.residual_edge_strength = residual_edge_strength
         self.residual_edge_radius = residual_edge_radius
         self.residual_anti_alias = residual_anti_alias
+        self.bw_black_image = bw_black_image
+        self.bw_white_image = bw_white_image
+        self.bw_anti_alias = bw_anti_alias
+        self.bw_binary_alpha = bw_binary_alpha
 
     def run(self) -> None:
         try:
@@ -1264,6 +1271,13 @@ class BGRWorker(QThread):
                 edge_radius=int(self.residual_edge_radius),
                 anti_alias=bool(self.residual_anti_alias),
             )
+        elif self.mode == "black_white":
+            if remove_background_black_white is None or self.bw_black_image is None or self.bw_white_image is None:
+                raise ValueError("请先选择黑底图和白底图")
+            return remove_background_black_white(
+                self.bw_black_image, self.bw_white_image,
+                anti_alias=bool(self.bw_anti_alias), binary_alpha=bool(self.bw_binary_alpha),
+            )
         return None
 
 
@@ -1326,7 +1340,7 @@ class BackgroundRemoverWidget(QWidget):
 
         self._mode_group = QButtonGroup()
         self._mode_buttons: dict[str, QPushButton] = {}
-        for idx, (label, val) in enumerate([("按颜色", "color"), ("按通道", "channel"), ("棋盘格背景", "checkerboard"), ("残余清理", "residuals"), ("AI 智能", "ai")]):
+        for idx, (label, val) in enumerate([("按颜色", "color"), ("按通道", "channel"), ("棋盘格背景", "checkerboard"), ("黑白底合成", "black_white"), ("残余清理", "residuals"), ("AI 智能", "ai")]):
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.setMinimumWidth(82)
@@ -1401,11 +1415,13 @@ class BackgroundRemoverWidget(QWidget):
         self._page_color = QWidget()
         self._page_channel = QWidget()
         self._page_checkerboard = QWidget()
+        self._page_black_white = QWidget()
         self._page_residuals = QWidget()
         self._page_ai = QWidget()
         self._param_stack.addWidget(self._page_color)
         self._param_stack.addWidget(self._page_channel)
         self._param_stack.addWidget(self._page_checkerboard)
+        self._param_stack.addWidget(self._page_black_white)
         self._param_stack.addWidget(self._page_residuals)
         self._param_stack.addWidget(self._page_ai)
 
@@ -1425,6 +1441,7 @@ class BackgroundRemoverWidget(QWidget):
         self._build_color_controls()
         self._build_channel_controls()
         self._build_checkerboard_controls()
+        self._build_black_white_controls()
         self._build_residual_controls()
         self._build_ai_controls()
 
@@ -1702,6 +1719,46 @@ class BackgroundRemoverWidget(QWidget):
         lay.addRow("边缘清理半径 (px)", self._residual_edge_radius)
         lay.addRow("边缘处理", self._residual_anti_alias)
 
+    def _build_black_white_controls(self) -> None:
+        self._bw_black_image = None
+        self._bw_white_image = None
+        self._bw_black_label = QLabel("未选择黑底图")
+        self._bw_white_label = QLabel("未选择白底图")
+        self._bw_black_button = QPushButton("打开黑底图…")
+        self._bw_white_button = QPushButton("打开白底图…")
+        self._bw_black_button.clicked.connect(lambda: self._choose_bw_image("black"))
+        self._bw_white_button.clicked.connect(lambda: self._choose_bw_image("white"))
+        self._bw_anti_alias = QCheckBox("保留抗锯齿边缘")
+        self._bw_anti_alias.setChecked(True)
+        self._bw_anti_alias.toggled.connect(self._mark_dirty)
+        self._bw_binary_alpha = QCheckBox("二值透明（仅 0/255）")
+        self._bw_binary_alpha.toggled.connect(self._mark_dirty)
+        lay = QFormLayout(self._page_black_white)
+        lay.setContentsMargins(10, 14, 10, 10)
+        lay.setSpacing(8)
+        lay.addRow("黑底输入", self._bw_black_button)
+        lay.addRow("", self._bw_black_label)
+        lay.addRow("白底输入", self._bw_white_button)
+        lay.addRow("", self._bw_white_label)
+        lay.addRow("边缘处理", self._bw_anti_alias)
+        lay.addRow("", self._bw_binary_alpha)
+
+    def _choose_bw_image(self, which: str) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "选择黑白底图片", "", "Images (*.png *.jpg *.jpeg *.bmp)")
+        if not path:
+            return
+        try:
+            image = np.asarray(Image.open(path).convert("RGBA"), dtype=np.uint8)
+            if which == "black":
+                self._bw_black_image = image
+                self._bw_black_label.setText(Path(path).name)
+            else:
+                self._bw_white_image = image
+                self._bw_white_label.setText(Path(path).name)
+            self._mark_dirty()
+        except Exception as exc:
+            QMessageBox.warning(self, "打开失败", str(exc))
+
     def _update_builtin_label(self) -> None:
         exists = Path(self._ai_builtin_path).exists()
         if exists:
@@ -1735,12 +1792,13 @@ class BackgroundRemoverWidget(QWidget):
                 return
 
     def _show_mode_controls(self, mode: str) -> None:
-        index_map = {"color": 0, "channel": 1, "checkerboard": 2, "residuals": 3, "ai": 4}
+        index_map = {"color": 0, "channel": 1, "checkerboard": 2, "black_white": 3, "residuals": 4, "ai": 5}
         self._param_stack.setCurrentIndex(index_map.get(mode, 0))
         title_map = {
             "color": "按颜色 — 处理参数",
             "channel": "按通道 — 处理参数",
             "checkerboard": "棋盘格背景 — 处理参数",
+            "black_white": "黑白底合成 — 处理参数",
             "residuals": "残余色块清理 — 处理参数",
             "ai": "AI 智能 — 处理参数",
         }
@@ -2022,6 +2080,14 @@ class BackgroundRemoverWidget(QWidget):
                     edge_radius=self._residual_edge_radius.value(),
                     anti_alias=self._residual_anti_alias.isChecked(),
                 )
+            elif mode == "black_white":
+                if remove_background_black_white is None or self._bw_black_image is None or self._bw_white_image is None:
+                    raise ValueError("请先选择黑底图和白底图")
+                return remove_background_black_white(
+                    self._bw_black_image, self._bw_white_image,
+                    anti_alias=self._bw_anti_alias.isChecked(),
+                    binary_alpha=self._bw_binary_alpha.isChecked(),
+                )
         except Exception as exc:
             QMessageBox.warning(self, "处理失败", str(exc))
             return None
@@ -2099,6 +2165,10 @@ class BackgroundRemoverWidget(QWidget):
             residual_edge_strength=self._residual_edge_strength.value(),
             residual_edge_radius=self._residual_edge_radius.value(),
             residual_anti_alias=self._residual_anti_alias.isChecked(),
+            bw_black_image=self._bw_black_image,
+            bw_white_image=self._bw_white_image,
+            bw_anti_alias=self._bw_anti_alias.isChecked(),
+            bw_binary_alpha=self._bw_binary_alpha.isChecked(),
         )
         self._worker.finished.connect(self._on_worker_done)
         self._worker.failed.connect(self._on_worker_failed)

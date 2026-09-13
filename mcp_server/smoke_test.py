@@ -33,6 +33,15 @@ async def main() -> None:
             for x in range(12, 28):
                 pixels[x, y] = (220, 40, 30, 255)
         checker.save(checker_source)
+        bw_black = workdir / "black.png"
+        bw_white = workdir / "white.png"
+        matte = Image.new("RGBA", (24, 20), (0, 0, 0, 0))
+        matte.paste((180, 80, 30, 255), (6, 5, 18, 15))
+        black = Image.new("RGB", matte.size, (0, 0, 0))
+        white = Image.new("RGB", matte.size, (255, 255, 255))
+        black.paste(matte, mask=matte.getchannel("A"))
+        white.paste(matte, mask=matte.getchannel("A"))
+        black.save(bw_black); white.save(bw_white)
         process = await asyncio.create_subprocess_exec(
             sys.executable, "-u", str(ROOT / "mcp_server" / "server.py"),
             cwd=workdir, stdin=asyncio.subprocess.PIPE,
@@ -95,7 +104,7 @@ async def main() -> None:
             await request("notifications/initialized", notification=True)
             result = await request("tools/list")
             names = {tool["name"] for tool in result["tools"]}
-            assert names == {"resize_image", "refine_pixel_art", "remove_image_background", "remove_fake_checkerboard", "cleanup_background_residuals", "launch_desktop_app", "check_desktop_startup", "check_splitter_drag", "inspect_image", "check_project_health"}, names
+            assert names == {"resize_image", "refine_pixel_art", "remove_image_background", "remove_fake_checkerboard", "cleanup_background_residuals", "remove_background_black_white", "launch_desktop_app", "check_desktop_startup", "check_splitter_drag", "inspect_image", "check_project_health"}, names
             print("PASS tools/list: " + ", ".join(sorted(names)))
             await call("resize_image", {"input_path": str(source), "width": 32, "height": 48})
             metadata = await call("inspect_image", {"input_path": str(source)})
@@ -109,6 +118,8 @@ async def main() -> None:
                 assert output.getpixel((32, 32))[3] == 255
             checker_result = await call("remove_fake_checkerboard", {"input_path": str(checker_source), "tile_size": 4, "binary_alpha": True})
             assert checker_result["transparent_pixels"] > 0
+            bw_result = await call("remove_background_black_white", {"black_path": str(bw_black), "white_path": str(bw_white)})
+            assert bw_result["partial_alpha_pixels"] == 0
             await call("refine_pixel_art", {"input_path": str(ROOT / "images" / "avatar.png")})
             invalid = await request("tools/call", {"name": "resize_image", "arguments": {
                 "input_path": str(source), "width": 0, "height": 10,
