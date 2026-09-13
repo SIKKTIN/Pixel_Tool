@@ -439,7 +439,6 @@ class CropView(QGraphicsView):
         if self._crop_box is None or self._image_size == (0, 0) or self._pix_item is None:
             return
 
-        from PySide6.QtGui import QPainter, QPolygonF
         painter = QPainter(self.viewport())
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setBrush(QBrush(QColor(0, 0, 0, 150)))
@@ -1083,7 +1082,7 @@ class ImageCropWidget(QWidget):
 
         size_text = f"{out_w}×{out_h}"
 
-        self.lbl_result.setText(f"裁剪: ({x},{y}) {w}×{h} → {size_text}")
+        self.lbl_res.setText(f"裁剪: ({x},{y}) {w}×{h} → {size_text}")
         self.btn_export.setEnabled(True)
 
     def _update_preview(self) -> None:
@@ -1105,7 +1104,7 @@ class ImageCropWidget(QWidget):
         self._result = np.ascontiguousarray(cropped, dtype=np.uint8)
         self.preview_view.load(self._result)
         size_text = f"{out_w}×{out_h}"
-        self.lbl_result.setText(f"裁剪: ({x},{y}) {w}×{h} → {size_text}")
+        self.lbl_res.setText(f"裁剪: ({x},{y}) {w}×{h} → {size_text}")
         self.btn_export.setEnabled(True)
         self.btn_to_buf.setEnabled(True)
         self.lbl_status.setText(f"裁剪完成：({x},{y}) {w}×{h} → {size_text}")
