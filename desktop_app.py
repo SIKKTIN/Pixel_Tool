@@ -17,8 +17,8 @@ import numpy as np
 import cv2
 from PIL import Image
 
-from PySide6.QtCore import Qt, QThread, Signal, QSize, QObject, QEvent, QTimer
-from PySide6.QtGui import QAction, QIcon, QImage, QPixmap, QKeySequence, QShortcut
+from PySide6.QtCore import Qt, QThread, Signal, QSize, QObject, QEvent, QTimer, QMimeData
+from PySide6.QtGui import QAction, QIcon, QImage, QPixmap, QKeySequence, QShortcut, QDrag
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -346,6 +346,15 @@ class _ThumbItem(QWidget):
             self._is_active = True
             self._update_border()
             self.clicked.emit(self._item_id)
+            mime = QMimeData()
+            mime.setText(f"perfect-pixel-buffer:{self._item_id}")
+            drag = QDrag(self)
+            drag.setMimeData(mime)
+            pix = self._lbl_img.pixmap()
+            if pix is not None:
+                drag.setPixmap(pix)
+            drag.exec(Qt.CopyAction)
+            return
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:
@@ -2735,6 +2744,25 @@ class ToolActionPanel(QGroupBox):
 
 
 class MainWindow(QMainWindow):
+    def eventFilter(self, watched, event):
+        if watched is getattr(self, "tabs", None):
+            if event.type() == QEvent.DragEnter:
+                if event.mimeData().text().startswith("perfect-pixel-buffer:"):
+                    event.acceptProposedAction()
+                    return True
+            if event.type() == QEvent.Drop:
+                token = event.mimeData().text()
+                prefix = "perfect-pixel-buffer:"
+                if token.startswith(prefix):
+                    image = image_buffer().get_by_id(token[len(prefix):])
+                    widget = self.tabs.currentWidget()
+                    loader = getattr(widget, "load_from_buffer", None)
+                    if image is not None and callable(loader):
+                        loader(image)
+                        event.acceptProposedAction()
+                    return True
+        return super().eventFilter(watched, event)
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Perfect Pixel Tool")
@@ -2750,6 +2778,8 @@ class MainWindow(QMainWindow):
         self.tabs.setTabPosition(QTabWidget.North)
         self.tabs.setMovable(False)
         self.tabs.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        self.tabs.setAcceptDrops(True)
+        self.tabs.installEventFilter(self)
 
         # ------- 第一个工具 -------
         self.pixel_tab = PixelRefineWidget()
