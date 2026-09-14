@@ -2801,9 +2801,18 @@ class MainWindow(QMainWindow):
             placeholder_wm = QWidget()
             ph_layout = QVBoxLayout(placeholder_wm)
             ph_layout.setAlignment(Qt.AlignCenter)
+            if getattr(sys, "frozen", False):
+                recovery = "请使用包含去水印依赖的完整发行目录，或通过 dev.bat 启动源码版。"
+            else:
+                recovery = (
+                    "请在当前 Python 环境补齐依赖，安装后重启应用：\n\n"
+                    f'"{sys.executable}" -m pip install -r "{_PROJECT_ROOT / "requirements.txt"}"'
+                )
             ph_label = QLabel(
-                f"⚠️ 去水印模块加载失败\n\n{exc}\n\n请检查 torch / opencv-python 是否已安装。"
+                f"⚠️ 去水印模块加载失败\n\n{exc}\n\n{recovery}"
             )
+            ph_label.setTextFormat(Qt.PlainText)
+            ph_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
             ph_label.setAlignment(Qt.AlignCenter)
             ph_label.setStyleSheet("color: #c33; font-size: 14px;")
             ph_label.setWordWrap(True)

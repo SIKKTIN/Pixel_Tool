@@ -54,6 +54,30 @@ python -m venv .venv
 
 网页入口：`.venv\Scripts\python.exe app.py`。
 
+### 去水印依赖与检查
+
+仅安装 `numpy opencv-python Pillow PySide6` 可以启动桌面，但不包含去水印所需依赖。
+出现 `No module named 'torch'` 时，请在 **dev.bat 显示的同一个 Python 环境** 中安装：
+
+```powershell
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+有 NVIDIA 显卡且驱动兼容 CUDA 12.8 时，可以先按 [PyTorch 官方安装说明](https://pytorch.org/get-started/locally/)
+安装 GPU 版本，再运行上面的命令补齐其余依赖：
+
+```powershell
+.venv\Scripts\python.exe -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+```
+
+本地模型需要 `big-lama.pt` 和 `slbr.pth.tar`，放在项目 `models/` 下，或通过
+`PERFECTPIXEL_MODEL_DIR` 指定；也兼容已有的 `../Test/src/models/` 目录。
+安装后重启应用。以下命令会实际加载去水印 Tab、执行两个模型，并检查透明度、缓存结果与 PNG 保存：
+
+```powershell
+.venv\Scripts\python.exe tools/check_watermark.py --inference
+```
+
 ## MCP 服务
 
 MCP 服务位于 `mcp_server/server.py`，采用 stdio JSON-RPC；stdout 只用于协议消息，诊断信息写入 stderr。启动：
