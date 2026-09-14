@@ -22,7 +22,10 @@ class SequencePreviewWidget(QWidget):
         self._timer.timeout.connect(self._next_frame)
 
         root = QVBoxLayout(self)
-        toolbar = QHBoxLayout()
+        self._shared_controls = QWidget()
+        shared_layout = QVBoxLayout(self._shared_controls)
+        shared_layout.setContentsMargins(0, 0, 0, 0)
+        toolbar = QVBoxLayout()
         self.open_btn = QPushButton("打开序列图")
         self.open_btn.clicked.connect(self.open_image)
         toolbar.addWidget(self.open_btn)
@@ -36,10 +39,10 @@ class SequencePreviewWidget(QWidget):
         self.fps = QDoubleSpinBox(); self.fps.setRange(1, 60); self.fps.setValue(8); self.fps.setSuffix(" FPS")
         self.fps.valueChanged.connect(self.update_timer); toolbar.addWidget(self.fps)
         self.loop = QCheckBox("循环播放"); self.loop.setChecked(True); toolbar.addWidget(self.loop)
-        toolbar.addStretch(1); root.addLayout(toolbar)
+        toolbar.addStretch(1); shared_layout.addLayout(toolbar)
 
         self.preview = QLabel("请打开一张横向或网格序列图")
-        self.preview.setAlignment(Qt.AlignCenter); self.preview.setMinimumSize(640, 420)
+        self.preview.setAlignment(Qt.AlignCenter); self.preview.setMinimumSize(0, 0)
         self.preview.setStyleSheet("background:#202020; color:#aaa; border:1px solid #555;")
         root.addWidget(self.preview, 1)
 
@@ -49,7 +52,18 @@ class SequencePreviewWidget(QWidget):
         self.frame_slider = QSlider(Qt.Horizontal); self.frame_slider.setEnabled(False); self.frame_slider.valueChanged.connect(self.seek)
         controls.addWidget(self.frame_slider, 1)
         self.info = QLabel("未加载")
-        controls.addWidget(self.info); root.addLayout(controls)
+        controls.addWidget(self.info); shared_layout.addLayout(controls)
+        root.addWidget(self._shared_controls)
+
+    def detach_shared_controls(self):
+        self._shared_controls.setParent(None)
+        return self._shared_controls
+
+    def on_open(self):
+        self.open_image()
+
+    def on_run(self):
+        self.rebuild_frames()
 
     def open_image(self):
         path, _ = QFileDialog.getOpenFileName(self, "打开序列图", "", "图片 (*.png *.jpg *.jpeg *.webp *.bmp)")

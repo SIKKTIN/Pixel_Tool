@@ -823,6 +823,40 @@ class ImageView(QWidget):
         self._apply()
 
 
+class CanvasImageView(ImageView):
+    """可拖动的画布预览，拖动信号以原图像素为单位发出。"""
+
+    canvas_dragged = Signal(int, int)
+
+    def __init__(self, title: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(title, parent)
+        self._dragging = False
+        self._last_pos = None
+        self._label.installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        if watched is self._label:
+            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                self._dragging = True
+                self._last_pos = event.position().toPoint()
+                self._label.setCursor(Qt.ClosedHandCursor)
+                return True
+            if event.type() == QEvent.MouseMove and self._dragging and self._last_pos is not None:
+                pos = event.position().toPoint()
+                dx = round((pos.x() - self._last_pos.x()) / max(self._scale, 0.01))
+                dy = round((pos.y() - self._last_pos.y()) / max(self._scale, 0.01))
+                self._last_pos = pos
+                if dx or dy:
+                    self.canvas_dragged.emit(dx, dy)
+                return True
+            if event.type() == QEvent.MouseButtonRelease and self._dragging:
+                self._dragging = False
+                self._last_pos = None
+                self._label.setCursor(Qt.ArrowCursor)
+                return True
+        return super().eventFilter(watched, event)
+
+
 # ---------------------------------------------------------------------------
 # 尺寸缩放工具页
 # ---------------------------------------------------------------------------
@@ -838,7 +872,7 @@ SCALE_ALGORITHMS: dict[str, int] = {
 
 
 class ScaleWidget(QWidget):
-    """尺寸缩放工具:打开原图,通过算法 + 目标尺寸实时缩放,支持导出。"""
+    """尺寸调整：缩放图片，或在不重采样的情况下调整画布。"""
 
     _buf: "ImageBuffer | None" = None
 
@@ -850,7 +884,9 @@ class ScaleWidget(QWidget):
         super().__init__(parent)
 
         self.input_image: np.ndarray | None = None  # 原图 RGB uint8
+        self.output_image: np.ndarray | None = None
         self.last_saved_path: str | None = None
+        self._mode = "resize"
 
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
@@ -876,10 +912,24 @@ class ScaleWidget(QWidget):
         body.setSpacing(10)
 
         # 左:参数面板
-        param_box = QGroupBox("缩放参数")
+        param_box = QGroupBox("尺寸调整参数")
         form = QFormLayout(param_box)
         form.setContentsMargins(10, 14, 10, 10)
         form.setSpacing(8)
+
+        self.mode_group = QButtonGroup(self)
+        self.btn_resize_mode = QPushButton("缩放图片")
+        self.btn_resize_mode.setCheckable(True)
+        self.btn_resize_mode.setChecked(True)
+        self.btn_canvas_mode = QPushButton("调整画布")
+        self.btn_canvas_mode.setCheckable(True)
+        self.mode_group.addButton(self.btn_resize_mode, 0)
+        self.mode_group.addButton(self.btn_canvas_mode, 1)
+        self.mode_group.idClicked.connect(self._on_mode_changed)
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(self.btn_resize_mode)
+        mode_row.addWidget(self.btn_canvas_mode)
+        form.addRow("处理方式:", mode_row)
 
         self.cmb_algo = QComboBox()
         self.cmb_algo.addItems(list(SCALE_ALGORITHMS.keys()))
@@ -915,13 +965,47 @@ class ScaleWidget(QWidget):
         self.btn_apply.clicked.connect(self._apply_scale_to_size)
         form.addRow("", self.btn_apply)
 
+        self.lbl_position = QLabel("图片位置:")
+        self.cmb_h_align = QComboBox()
+        self.cmb_h_align.addItems(["左", "居中", "右"])
+        self.cmb_h_align.setCurrentText("居中")
+        self.cmb_v_align = QComboBox()
+        self.cmb_v_align.addItems(["上", "居中", "下"])
+        self.cmb_v_align.setCurrentText("居中")
+        align_row = QHBoxLayout()
+        align_row.addWidget(self.cmb_h_align)
+        align_row.addWidget(self.cmb_v_align)
+        form.addRow(self.lbl_position, align_row)
+        self.spn_offset_x = QSpinBox()
+        self.spn_offset_x.setRange(-16384, 16384)
+        self.spn_offset_x.setValue(0)
+        self.spn_offset_x.setFixedWidth(120)
+        self.spn_offset_y = QSpinBox()
+        self.spn_offset_y.setRange(-16384, 16384)
+        self.spn_offset_y.setValue(0)
+        self.spn_offset_y.setFixedWidth(120)
+        offset_row = QHBoxLayout()
+        offset_row.addWidget(QLabel("X:"))
+        offset_row.addWidget(self.spn_offset_x)
+        offset_row.addWidget(QLabel("Y:"))
+        offset_row.addWidget(self.spn_offset_y)
+        form.addRow("自由位置:", offset_row)
+        self.lbl_canvas_hint = QLabel("新增区域为透明；目标小于原图时会裁剪超出部分")
+        self.lbl_canvas_hint.setWordWrap(True)
+        self.lbl_canvas_hint.setStyleSheet("color: #888; font-size: 11px;")
+        form.addRow("", self.lbl_canvas_hint)
+
         self._shared_controls = param_box
+        self.btn_open_panel = QPushButton("打开图片…")
+        self.btn_open_panel.clicked.connect(self.on_open)
+        form.insertRow(0, "", self.btn_open_panel)
 
         # 右:双图预览
         preview_wrap = QVBoxLayout()
         preview_wrap.setSpacing(10)
         self.view_input = ImageView("原图")
-        self.view_output = ImageView("缩放后预览")
+        self.view_output = CanvasImageView("调整后预览")
+        self.view_output.canvas_dragged.connect(self._on_canvas_dragged)
         preview_wrap.addWidget(self.view_input, 1)
         preview_wrap.addWidget(self.view_output, 1)
         preview_wrap_w = QWidget()
@@ -951,9 +1035,15 @@ class ScaleWidget(QWidget):
         self.spn_w.valueChanged.connect(self._on_w_changed)
         self.spn_h.valueChanged.connect(self._on_h_changed)
         self.dsp_scale.valueChanged.connect(self._on_scale_changed)
+        self.cmb_h_align.currentTextChanged.connect(self._refresh_preview)
+        self.cmb_v_align.currentTextChanged.connect(self._refresh_preview)
+        self.spn_offset_x.valueChanged.connect(self._refresh_preview)
+        self.spn_offset_y.valueChanged.connect(self._refresh_preview)
+        self._update_mode_ui()
 
     def detach_shared_controls(self) -> QWidget:
         """Move scaling parameters into the shared tool panel."""
+        self.btn_open.setVisible(False)
         self._shared_controls.setParent(None)
         return self._shared_controls
 
@@ -1001,6 +1091,8 @@ class ScaleWidget(QWidget):
         self.spn_w.blockSignals(False)
         self.spn_h.blockSignals(False)
         self.dsp_scale.setValue(1.0)
+        self.spn_offset_x.setValue(0)
+        self.spn_offset_y.setValue(0)
         self._refresh_preview()
         self.btn_save_png.setEnabled(True)
         self.btn_save_jpg.setEnabled(True)
@@ -1013,6 +1105,9 @@ class ScaleWidget(QWidget):
         if self.input_image is None:
             return
         h0, w0 = self.input_image.shape[:2]
+        if self._mode == "canvas":
+            self._refresh_preview()
+            return
         self.dsp_scale.blockSignals(True)
         if w0:
             self.dsp_scale.setValue(w / w0)
@@ -1029,6 +1124,9 @@ class ScaleWidget(QWidget):
         if self.input_image is None:
             return
         h0, w0 = self.input_image.shape[:2]
+        if self._mode == "canvas":
+            self._refresh_preview()
+            return
         self.dsp_scale.blockSignals(True)
         if h0:
             self.dsp_scale.setValue(h / h0)
@@ -1055,6 +1153,30 @@ class ScaleWidget(QWidget):
         self.spn_h.blockSignals(False)
         self._refresh_preview()
 
+    def _on_mode_changed(self, mode_id: int) -> None:
+        self._mode = "resize" if mode_id == 0 else "canvas"
+        self._update_mode_ui()
+        self._refresh_preview()
+
+    def _on_canvas_dragged(self, dx: int, dy: int) -> None:
+        if self._mode != "canvas":
+            return
+        self.spn_offset_x.setValue(self.spn_offset_x.value() + dx)
+        self.spn_offset_y.setValue(self.spn_offset_y.value() + dy)
+
+    def _update_mode_ui(self) -> None:
+        canvas = self._mode == "canvas"
+        self.cmb_algo.setEnabled(not canvas)
+        self.chk_ratio.setEnabled(not canvas)
+        self.dsp_scale.setEnabled(not canvas)
+        self.btn_apply.setEnabled(not canvas)
+        self.cmb_h_align.setEnabled(canvas)
+        self.cmb_v_align.setEnabled(canvas)
+        self.spn_offset_x.setEnabled(canvas)
+        self.spn_offset_y.setEnabled(canvas)
+        self.lbl_position.setEnabled(canvas)
+        self.lbl_canvas_hint.setVisible(canvas)
+
     def _apply_scale_to_size(self) -> None:
         # 显式「应用倍率」按钮:用当前 dsp_scale 重算一次
         self._on_scale_changed(self.dsp_scale.value())
@@ -1068,12 +1190,37 @@ class ScaleWidget(QWidget):
     # 渲染与导出
     # ------------------------------------------------------------------
     def _current_output(self) -> np.ndarray | None:
-        if self.input_image is None and self._get_current_mode() != "black_white":
+        if self.input_image is None:
             return None
         target_w = self.spn_w.value()
         target_h = self.spn_h.value()
         if target_w <= 0 or target_h <= 0:
             return None
+        if self._mode == "canvas":
+            src_h, src_w = self.input_image.shape[:2]
+            out = np.zeros((target_h, target_w, 4), dtype=np.uint8)
+            copy_w, copy_h = min(src_w, target_w), min(src_h, target_h)
+            if self.cmb_h_align.currentText() == "右":
+                dx = target_w - copy_w
+            elif self.cmb_h_align.currentText() == "居中":
+                dx = (target_w - copy_w) // 2
+            else:
+                dx = 0
+            if self.cmb_v_align.currentText() == "下":
+                dy = target_h - copy_h
+            elif self.cmb_v_align.currentText() == "居中":
+                dy = (target_h - copy_h) // 2
+            else:
+                dy = 0
+            dx += self.spn_offset_x.value()
+            dy += self.spn_offset_y.value()
+            sx = max(0, -dx); sy = max(0, -dy)
+            dx = max(0, dx); dy = max(0, dy)
+            dst_w = min(copy_w - sx, target_w - dx)
+            dst_h = min(copy_h - sy, target_h - dy)
+            if dst_w > 0 and dst_h > 0:
+                out[dy:dy + dst_h, dx:dx + dst_w] = self.input_image[sy:sy + dst_h, sx:sx + dst_w]
+            return out
         algo = SCALE_ALGORITHMS.get(self.cmb_algo.currentText(), cv2.INTER_NEAREST)
         return cv2.resize(self.input_image, (target_w, target_h), interpolation=algo)
 
@@ -1081,10 +1228,19 @@ class ScaleWidget(QWidget):
         out = self._current_output()
         if out is None:
             return
+        self.output_image = np.ascontiguousarray(out, dtype=np.uint8)
+        panel = self.window().findChild(ToolActionPanel) if self.window() else None
+        if panel is not None:
+            panel.push_button.setEnabled(True)
         self.view_output.set_image(out)
         h, w = out.shape[:2]
         algo = self.cmb_algo.currentText()
-        self.status_message(f"已缩放至 {w} × {h}  |  {algo}")
+        if self._mode == "canvas":
+            src_h, src_w = self.input_image.shape[:2]
+            suffix = "（原图保持不变，超出部分已裁剪）" if w < src_w or h < src_h else "（透明画布）"
+            self.status_message(f"画布已调整至 {w} × {h}  |  {self.cmb_h_align.currentText()} / {self.cmb_v_align.currentText()} {suffix}")
+        else:
+            self.status_message(f"已缩放至 {w} × {h}  |  {algo}")
 
     def _on_save(self, fmt: str) -> None:
         out = self._current_output()
@@ -1092,7 +1248,8 @@ class ScaleWidget(QWidget):
             return
         ext = "png" if fmt == "png" else "jpg"
         filt = "PNG (*.png)" if fmt == "png" else "JPEG (*.jpg *.jpeg)"
-        default_name = f"scaled_{self.spn_w.value()}x{self.spn_h.value()}.{ext}"
+        prefix = "canvas" if self._mode == "canvas" else "scaled"
+        default_name = f"{prefix}_{self.spn_w.value()}x{self.spn_h.value()}.{ext}"
         path, _ = QFileDialog.getSaveFileName(
             self, f"导出为 {ext.upper()}", default_name, filt,
         )
@@ -1124,6 +1281,8 @@ class ScaleWidget(QWidget):
         self.spn_w.blockSignals(False)
         self.spn_h.blockSignals(False)
         self.dsp_scale.setValue(1.0)
+        self.spn_offset_x.setValue(0)
+        self.spn_offset_y.setValue(0)
         self._refresh_preview()
         self.btn_save_png.setEnabled(True)
         self.btn_save_jpg.setEnabled(True)
@@ -2598,7 +2757,7 @@ class MainWindow(QMainWindow):
 
         # ------- 第二个工具 -------
         self.scale_tab = ScaleWidget()
-        self.tabs.addTab(self.scale_tab, "📐 尺寸缩放")
+        self.tabs.addTab(self.scale_tab, "📐 尺寸调整")
         ScaleWidget.set_buffer_ref(image_buffer())
 
         # ------- 第三个工具:去水印 -------

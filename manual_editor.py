@@ -719,9 +719,13 @@ class ManualEditorWidget(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(10)
+        self._shared_controls = QWidget()
+        self._shared_controls_layout = QVBoxLayout(self._shared_controls)
+        self._shared_controls_layout.setContentsMargins(0, 0, 0, 0)
+        self._shared_controls_layout.setSpacing(8)
 
         # ---- 顶部工具栏 ----
-        toolbar = QHBoxLayout()
+        toolbar = QVBoxLayout()
         toolbar.setSpacing(8)
 
         self.btn_open = QPushButton("打开图片…")
@@ -795,10 +799,10 @@ class ManualEditorWidget(QWidget):
         self.btn_redo.clicked.connect(self._on_redo)
         toolbar.addWidget(self.btn_redo)
 
-        root.addLayout(toolbar)
+        self._shared_controls_layout.addLayout(toolbar)
 
         # ---- 第二行：笔刷参数 ----
-        param_row = QHBoxLayout()
+        param_row = QVBoxLayout()
         param_row.setSpacing(8)
 
         param_row.addWidget(QLabel("笔刷:"))
@@ -829,7 +833,8 @@ class ManualEditorWidget(QWidget):
         self.btn_reset_brush.clicked.connect(self._on_reset_brush)
         param_row.addWidget(self.btn_reset_brush)
 
-        root.addLayout(param_row)
+        self._shared_controls_layout.addLayout(param_row)
+        root.addWidget(self._shared_controls)
 
         # ---- 预览面板 ----
         self.view = EditableImageView("画布（拖动鼠标涂抹，滚轮缩放）")
@@ -839,7 +844,7 @@ class ManualEditorWidget(QWidget):
         root.addWidget(self.view, 1)
 
         # ---- 底部动作栏 ----
-        action_row = QHBoxLayout()
+        action_row = QVBoxLayout()
         action_row.setSpacing(8)
 
         self.btn_export_png = QPushButton("导出 PNG")
@@ -860,7 +865,13 @@ class ManualEditorWidget(QWidget):
         self.lbl_info.setStyleSheet("color: #888;")
         action_row.addWidget(self.lbl_info)
 
-        root.addLayout(action_row)
+        self._shared_controls_layout.addLayout(action_row)
+        self.setAcceptDrops(True)
+
+    def detach_shared_controls(self) -> QWidget:
+        """Move editor tools and brush parameters into the shared panel."""
+        self._shared_controls.setParent(None)
+        return self._shared_controls
 
         # ---- 快捷键 ----
         QShortcut(QKeySequence("Ctrl+Z"), self, activated=self._on_undo)

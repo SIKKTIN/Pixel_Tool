@@ -13,7 +13,7 @@ from typing import Optional
 
 import numpy as np
 
-from PySide6.QtCore import Qt, QSize, QRectF
+from PySide6.QtCore import Qt, QSize, QRectF, QPoint
 from PySide6.QtGui import (
     QColor,
     QImage,
@@ -104,6 +104,8 @@ class PreviewView(QGraphicsView):
         self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
         self.setMinimumSize(420, 320)
         self._zoom: float = 1.0
+        self._pan_active = False
+        self._pan_last = QPoint()
         self._min_zoom = 0.1
         self._max_zoom = 8.0
 
@@ -129,6 +131,33 @@ class PreviewView(QGraphicsView):
             event.accept()
             return
         super().mouseDoubleClickEvent(event)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.RightButton:
+            self._pan_active = True
+            self._pan_last = event.pos()
+            self.setCursor(Qt.ClosedHandCursor)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._pan_active:
+            delta = event.pos() - self._pan_last
+            self._pan_last = event.pos()
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.RightButton:
+            self._pan_active = False
+            self.setCursor(Qt.ArrowCursor)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def fit_to_view(self) -> None:
         """让 sceneRect 完整显示在视口内，并同步内部 _zoom。"""
@@ -161,9 +190,12 @@ class ImageSplitterWidget(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(10)
+        self._shared_controls = QWidget()
+        self._shared_controls_layout = QVBoxLayout(self._shared_controls)
+        self._shared_controls_layout.setContentsMargins(0, 0, 0, 0)
 
         # ---- 顶部操作栏 ----
-        toolbar = QHBoxLayout()
+        toolbar = QVBoxLayout()
         toolbar.setSpacing(8)
 
         btn_open = QPushButton("打开图片…")
@@ -215,7 +247,8 @@ class ImageSplitterWidget(QWidget):
         self.btn_clear_sel.clicked.connect(self._on_clear_selection)
         toolbar.addWidget(self.btn_clear_sel)
 
-        root.addLayout(toolbar)
+        self._shared_controls_layout.addLayout(toolbar)
+        root.addWidget(self._shared_controls)
 
         # ---- 原图预览（左）+ 切割预览（右）----
         body = QHBoxLayout()
@@ -268,6 +301,10 @@ class ImageSplitterWidget(QWidget):
         self._selected_indices: set[int] = set()
         self._refresh_preview_title()
         self._update_selection_label()
+
+    def detach_shared_controls(self) -> QWidget:
+        self._shared_controls.setParent(None)
+        return self._shared_controls
 
     # ------------------------------------------------------------------
     def _on_open(self) -> None:

@@ -68,7 +68,7 @@ python desktop_app.py          # 开发模式
 | Tab | 入口类 | 功能 | 依赖 |
 | :--- | :--- | :--- | :--- |
 | 🎨 **像素细化** | `PixelRefineWidget` | 自动检测网格并对齐 | 核心库 |
-| 📐 **尺寸缩放** | `ScaleWidget` | 按目标尺寸重新采样 | OpenCV |
+| 📐 **尺寸调整** | `ScaleWidget` | 图片缩放或保持像素不变调整透明画布，支持预览拖动定位 | OpenCV |
 | 🪄 **去水印** | `WatermarkWidget` | SLBR + LaMa 两个 AI 模型自动修复 | PyTorch（可选） |
 | 🎭 **去背景** | `BackgroundRemoverWidget` | 颜色 / Alpha / AI 三种模式 | ISNet ONNX（可选） |
 | ✏️ **手动编辑** | `ManualEditorWidget` | 画笔 + 橡皮擦精修 RGBA | 核心库 |

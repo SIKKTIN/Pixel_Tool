@@ -13,7 +13,7 @@ from typing import Optional
 
 import numpy as np
 
-from PySide6.QtCore import Qt, QPointF, QRect, QRectF, Signal
+from PySide6.QtCore import Qt, QPoint, QPointF, QRect, QRectF, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -280,6 +280,8 @@ class CropView(QGraphicsView):
         self._mode = self.MODE_RESIZE
         self._free_polygon: list[QPointF] = []
         self._free_drawing = False
+        self._pan_active = False
+        self._pan_last = QPoint()
 
         # 拖拽状态
         self._drag_mode = self.DRAG_NONE
@@ -540,6 +542,12 @@ class CropView(QGraphicsView):
         return self._sel_rect.adjusted(-pad, -pad, pad, pad).contains(img_pt)
 
     def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.RightButton:
+            self._pan_active = True
+            self._pan_last = event.pos()
+            self.setCursor(Qt.ClosedHandCursor)
+            event.accept()
+            return
         if event.button() != Qt.LeftButton:
             super().mousePressEvent(event)
             return
@@ -607,6 +615,13 @@ class CropView(QGraphicsView):
         event.accept()
 
     def mouseMoveEvent(self, event) -> None:
+        if self._pan_active:
+            delta = event.pos() - self._pan_last
+            self._pan_last = event.pos()
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
+            event.accept()
+            return
         if self._drag_mode == self.DRAG_NONE:
             if self._crop_box:
                 if self._mode == self.MODE_MOVE:
@@ -671,6 +686,11 @@ class CropView(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.RightButton:
+            self._pan_active = False
+            self.setCursor(Qt.ArrowCursor)
+            event.accept()
+            return
         if self._free_drawing:
             self.finish_freeform(); event.accept(); return
         if self._drag_mode != self.DRAG_NONE:
@@ -713,6 +733,8 @@ class PreviewView(QGraphicsView):
         self._max_zoom = 32.0
         self._pix_item: QGraphicsPixmapItem | None = None
         self._border_item: QGraphicsRectItem | None = None
+        self._pan_active = False
+        self._pan_last = QPoint()
         self._show_placeholder()
 
     def _show_placeholder(self) -> None:
@@ -757,6 +779,33 @@ class PreviewView(QGraphicsView):
         else:
             super().wheelEvent(event)
 
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.RightButton:
+            self._pan_active = True
+            self._pan_last = event.pos()
+            self.setCursor(Qt.ClosedHandCursor)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._pan_active:
+            delta = event.pos() - self._pan_last
+            self._pan_last = event.pos()
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.RightButton:
+            self._pan_active = False
+            self.setCursor(Qt.ArrowCursor)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
     def fit_to_view(self) -> None:
         r = self._scene.sceneRect()
         if r.isEmpty():
@@ -798,9 +847,12 @@ class ImageCropWidget(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(10)
+        self._shared_controls = QWidget()
+        self._shared_controls_layout = QVBoxLayout(self._shared_controls)
+        self._shared_controls_layout.setContentsMargins(0, 0, 0, 0)
 
         # ---- 工具栏 ----
-        tb = QHBoxLayout()
+        tb = QVBoxLayout()
         tb.setSpacing(8)
 
         btn_open = QPushButton("打开图片…")
@@ -875,7 +927,7 @@ class ImageCropWidget(QWidget):
         tb.addWidget(self.btn_apply)
 
         tb.addStretch(1)
-        root.addLayout(tb)
+        self._shared_controls_layout.addLayout(tb)
 
         # ---- 主视图 ----
         body = QHBoxLayout()
@@ -925,9 +977,14 @@ class ImageCropWidget(QWidget):
         self.btn_out.clicked.connect(self._on_to_buffer)
         self.btn_out.setEnabled(False)
         bottom.addWidget(self.btn_out)
-        root.addLayout(bottom)
+        self._shared_controls_layout.addLayout(bottom)
+        root.addWidget(self._shared_controls)
 
         self._update_preview()
+
+    def detach_shared_controls(self) -> QWidget:
+        self._shared_controls.setParent(None)
+        return self._shared_controls
 
     def load(self, arr: np.ndarray | None) -> None:
         """供暂存区双击调用：将图片送入裁剪视图。"""
